@@ -1,6 +1,3 @@
-// Broadcast Message Extension for SillyTavern
-// 여러 채팅에 동일한 메시지를 보내고 자동으로 숨김 처리
-
 import {
     saveSettingsDebounced,
     eventSource,
@@ -9,29 +6,23 @@ import {
 
 import { extension_settings } from '../../../extensions.js';
 
-// SillyTavern context에서 함수들 가져오기
 const getContext = () => SillyTavern.getContext();
 const getCallPopup = () => getContext().callPopup;
 const executeSlashCommands = (cmd) => getContext().executeSlashCommands(cmd);
 
 const extensionName = 'broadcast-message';
 
-// 기본 설정
 const defaultSettings = {
     autoHide: true,
     showBroadcastBtn: true,
     showHideBtn: true,
     showBackupBtn: true,
-    expectedPersona: '', // 예상 페르소나 이름
+    expectedPersona: '',
 };
 
-// 상태 관리
 let isProcessing = false;
 let selectedChats = [];
 
-/**
- * 설정 초기화
- */
 function loadSettings() {
     extension_settings[extensionName] = extension_settings[extensionName] || {};
     
@@ -42,9 +33,6 @@ function loadSettings() {
     }
 }
 
-/**
- * 설정 UI 생성
- */
 function createSettingsUI() {
     const settingsHtml = `
         <div class="broadcast-settings">
@@ -103,18 +91,12 @@ function createSettingsUI() {
     });
 }
 
-/**
- * 버튼 표시 여부 업데이트
- */
 function updateButtonVisibility() {
     $('#broadcast-btn').toggle(extension_settings[extensionName].showBroadcastBtn);
     $('#hide-btn').toggle(extension_settings[extensionName].showHideBtn);
     $('#backup-btn').toggle(extension_settings[extensionName].showBackupBtn);
 }
 
-/**
- * 캐릭터 목록 가져오기
- */
 async function getChatList() {
     const ctx = getContext();
     const characters = [];
@@ -148,9 +130,6 @@ async function getChatList() {
     return characters;
 }
 
-/**
- * 브로드캐스트 UI 열기
- */
 async function openChatSelector() {
     if (isProcessing) {
         toastr.warning('이미 브로드캐스트가 진행 중입니다.');
@@ -237,9 +216,6 @@ async function openChatSelector() {
     }
 }
 
-/**
- * 하이드 모달 열기
- */
 async function openHideModal() {
     const popupContent = `
         <div style="display:flex; flex-direction:column; gap:15px; min-width:300px;">
@@ -268,9 +244,6 @@ async function openHideModal() {
     }
 }
 
-/**
- * 마지막 N개 메시지 숨기기
- */
 async function hideLastMessages(count) {
     const currentChat = getContext().chat;
     const totalMessages = currentChat.length;
@@ -296,9 +269,6 @@ async function hideLastMessages(count) {
     }
 }
 
-/**
- * 백업 모달 열기 - 최신 메시지부터 표시
- */
 async function openBackupModal() {
     const ctx = getContext();
     const currentChat = ctx.chat;
@@ -308,14 +278,12 @@ async function openBackupModal() {
         return;
     }
     
-    // 현재 캐릭터 확인
     const currentCharId = ctx.characterId;
     if (currentCharId === undefined) {
         toastr.error('캐릭터를 먼저 선택해주세요.');
         return;
     }
     
-    // 최신 메시지부터 표시 (역순)
     const reversedChat = [...currentChat].reverse();
     
     const popupContent = `
@@ -373,9 +341,6 @@ async function openBackupModal() {
     }
 }
 
-/**
- * 파일명에서 .jsonl 확장자 제거
- */
 function removeJsonlExtension(fileName) {
     if (fileName && fileName.endsWith('.jsonl')) {
         return fileName.slice(0, -6);
@@ -383,9 +348,6 @@ function removeJsonlExtension(fileName) {
     return fileName;
 }
 
-/**
- * 백업 대상 채팅 파일 선택 - API로 목록 가져오기
- */
 async function openBackupTargetSelector(selectedIndices) {
     const ctx = getContext();
     const currentCharId = ctx.characterId;
@@ -396,11 +358,9 @@ async function openBackupTargetSelector(selectedIndices) {
         return;
     }
     
-    // 현재 채팅 파일의 file_id (확장자 제거)
     const currentChatFileId = removeJsonlExtension(currentCharacter.chat);
     
     try {
-        // 채팅 파일 목록 API로 가져오기
         const response = await fetch('/api/characters/chats', {
             method: 'POST',
             headers: ctx.getRequestHeaders(),
@@ -428,7 +388,6 @@ async function openBackupTargetSelector(selectedIndices) {
                 
                 <div style="max-height:250px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:5px; padding:10px; background:var(--SmartThemeBlurTintColor);">
                     ${chatFiles.map((file) => {
-                        // file_id 사용 (확장자 없음)
                         const fileId = file.file_id || removeJsonlExtension(file.file_name);
                         const displayName = file.file_name || fileId;
                         const isCurrent = fileId === currentChatFileId;
@@ -473,9 +432,6 @@ async function openBackupTargetSelector(selectedIndices) {
     }
 }
 
-/**
- * 메시지를 다른 파일로 복사/이동 - openCharacterChat 사용
- */
 async function copyMessagesToFile(indices, targetFileId, currentFileId, deleteOriginal) {
     const ctx = getContext();
     const currentChat = ctx.chat;
@@ -483,22 +439,18 @@ async function copyMessagesToFile(indices, targetFileId, currentFileId, deleteOr
     try {
         toastr.info('메시지 처리 중...');
         
-        // 복사할 메시지들 (인덱스 순서대로 정렬)
         const sortedIndices = [...indices].sort((a, b) => a - b);
         const messagesToCopy = sortedIndices.map(i => JSON.parse(JSON.stringify(currentChat[i])));
         
         console.log('[Broadcast] Switching to target file:', targetFileId);
         
-        // 1. 대상 채팅 파일로 전환 (file_id 사용 - 확장자 없음)
         await ctx.openCharacterChat(targetFileId);
         await sleep(2000);
         
-        // 채팅 로드 완료 대기
         await waitForChatLoad();
         
         console.log('[Broadcast] Target chat loaded, messages:', ctx.chat.length);
         
-        // 2. 대상 채팅에 메시지 추가
         const targetChat = ctx.chat;
         for (const msg of messagesToCopy) {
             targetChat.push(msg);
@@ -506,21 +458,17 @@ async function copyMessagesToFile(indices, targetFileId, currentFileId, deleteOr
         
         console.log('[Broadcast] Messages added, saving...');
         
-        // 3. 대상 채팅 저장
         await ctx.saveChat();
         await sleep(500);
         
         console.log('[Broadcast] Saved, switching back to:', currentFileId);
         
-        // 4. 원본 파일로 돌아가기 (file_id 사용)
         await ctx.openCharacterChat(currentFileId);
         await sleep(2000);
         await waitForChatLoad();
         
-        // 5. 원본에서 삭제 (옵션)
         if (deleteOriginal) {
             const currentChatNow = ctx.chat;
-            // 역순으로 삭제 (인덱스 밀림 방지)
             for (const index of [...indices].sort((a, b) => b - a)) {
                 if (index < currentChatNow.length) {
                     currentChatNow.splice(index, 1);
@@ -537,7 +485,6 @@ async function copyMessagesToFile(indices, targetFileId, currentFileId, deleteOr
         console.error('[Broadcast] Error copying messages:', error);
         toastr.error(`메시지 처리 실패: ${error.message}`);
         
-        // 에러 시 원본 파일로 복귀 시도
         try {
             await ctx.openCharacterChat(currentFileId);
         } catch (e) {
@@ -546,9 +493,6 @@ async function copyMessagesToFile(indices, targetFileId, currentFileId, deleteOr
     }
 }
 
-/**
- * 채팅 로드 완료 대기
- */
 function waitForChatLoad() {
     return new Promise((resolve) => {
         let attempts = 0;
@@ -556,7 +500,6 @@ function waitForChatLoad() {
         
         const checkInterval = setInterval(() => {
             attempts++;
-            // 로딩 표시가 사라지면 완료
             if (!$('#chat').hasClass('loading') && $('#chat .mes').length >= 0) {
                 clearInterval(checkInterval);
                 setTimeout(resolve, 500);
@@ -571,9 +514,6 @@ function waitForChatLoad() {
     });
 }
 
-/**
- * 브로드캐스트 실행
- */
 async function broadcastMessage(message, autoHide) {
     if (isProcessing) {
         toastr.warning('이미 진행 중입니다.');
@@ -593,11 +533,9 @@ async function broadcastMessage(message, autoHide) {
         const chatInfo = selectedChats[i];
         
         try {
-            // 1. 캐릭터 전환 (/go 커맨드 사용)
             toastr.info(`${chatInfo.name} 채팅으로 이동 중...`);
             await switchToChat(chatInfo);
             
-            // 2. 전환 검증 (캐릭터명 + 페르소나)
             const verified = await verifyCurrentChat(chatInfo.name, expectedPersona);
             if (!verified) {
                 toastr.error(`${chatInfo.name}: 채팅 전환 검증 실패, 스킵합니다`);
@@ -607,18 +545,14 @@ async function broadcastMessage(message, autoHide) {
             
             const msgCountBefore = getContext().chat.length;
             
-            // 3. 메시지 전송
             $('#send_textarea').val(message);
             $('#send_but').trigger('click');
             
-            // 4. Typing Indicator가 사라질 때까지 대기 (응답 완료)
             toastr.info(`${chatInfo.name} 응답 대기 중...`);
             await waitForTypingIndicatorGone();
             
-            // 5. 추가 안정화 대기
             await sleep(1000);
             
-            // 6. 자동 숨기기
             if (autoHide) {
                 const msgCountAfter = getContext().chat.length;
                 if (msgCountAfter > msgCountBefore) {
@@ -628,7 +562,6 @@ async function broadcastMessage(message, autoHide) {
                     await executeSlashCommands(`/hide ${hideStart}-${hideEnd}`);
                     await sleep(500);
                     
-                    // 하이드 완료 확인
                     const chat = getContext().chat;
                     const allHidden = chat.slice(hideStart, hideEnd + 1).every(m => m.is_hidden);
                     if (!allHidden) {
@@ -642,7 +575,6 @@ async function broadcastMessage(message, autoHide) {
             successCount++;
             toastr.success(`${successCount}/${totalCount} 완료: ${chatInfo.name}`);
             
-            // 다음 캐릭터로 넘어가기 전 잠시 대기
             if (i < selectedChats.length - 1) {
                 await sleep(1500);
             }
@@ -663,9 +595,6 @@ async function broadcastMessage(message, autoHide) {
     }
 }
 
-/**
- * 채팅 전환
- */
 async function switchToChat(chatInfo) {
     const ctx = getContext();
     
@@ -690,9 +619,6 @@ async function switchToChat(chatInfo) {
     }
 }
 
-/**
- * 캐릭터 전환 완료 대기
- */
 function waitForCharacterSwitch(targetId) {
     return new Promise((resolve) => {
         let attempts = 0;
@@ -716,27 +642,20 @@ function waitForCharacterSwitch(targetId) {
     });
 }
 
-/**
- * 현재 채팅이 올바른지 검증 (캐릭터명 + 페르소나)
- */
 async function verifyCurrentChat(expectedCharName, expectedPersona) {
     const ctx = getContext();
     
-    // 1. 캐릭터명 검증
     let currentCharName = '';
     
     if (ctx.groupId) {
-        // 그룹인 경우
         const groups = ctx.groups || [];
         const currentGroup = groups.find(g => g.id === ctx.groupId);
         currentCharName = currentGroup?.name || '';
     } else if (ctx.characterId !== undefined && ctx.characters) {
-        // 개인 캐릭터인 경우
         const currentChar = ctx.characters[ctx.characterId];
         currentCharName = currentChar?.name || '';
     }
     
-    // 캐릭터명 비교 (공백 무시, 대소문자 무시)
     const normalizedExpected = expectedCharName.trim().toLowerCase();
     const normalizedCurrent = currentCharName.trim().toLowerCase();
     
@@ -747,7 +666,6 @@ async function verifyCurrentChat(expectedCharName, expectedPersona) {
     
     console.log(`[Broadcast] Character verified: ${currentCharName}`);
     
-    // 2. 페르소나 검증 (설정된 경우에만)
     if (expectedPersona && expectedPersona.trim()) {
         const currentPersona = ctx.name1 || '';
         const normalizedExpectedPersona = expectedPersona.trim().toLowerCase();
@@ -765,15 +683,11 @@ async function verifyCurrentChat(expectedCharName, expectedPersona) {
     return true;
 }
 
-/**
- * Typing Indicator가 사라질 때까지 대기
- */
-function waitForTypingIndicatorGone(maxWait = 300000) { // 최대 5분
+function waitForTypingIndicatorGone(maxWait = 300000) {
     return new Promise((resolve) => {
         let elapsed = 0;
         const checkInterval = 500;
         
-        // 먼저 typing indicator가 나타날 때까지 잠시 대기
         setTimeout(() => {
             const interval = setInterval(() => {
                 elapsed += checkInterval;
@@ -783,7 +697,6 @@ function waitForTypingIndicatorGone(maxWait = 300000) { // 최대 5분
                                     $('#mes_stop').is(':visible') ||
                                     $('#chat').hasClass('loading');
                 
-                // typing indicator가 없고 생성 중이 아니면 완료
                 if (!typingIndicator && !isGenerating) {
                     clearInterval(interval);
                     console.log('[Broadcast] Response completed (typing indicator gone)');
@@ -791,27 +704,20 @@ function waitForTypingIndicatorGone(maxWait = 300000) { // 최대 5분
                     return;
                 }
                 
-                // 최대 대기 시간 초과
                 if (elapsed >= maxWait) {
                     clearInterval(interval);
                     console.warn('[Broadcast] Max wait time exceeded');
                     resolve(false);
                 }
             }, checkInterval);
-        }, 1000); // 1초 후부터 체크 시작
+        }, 1000);
     });
 }
 
-/**
- * 슬립 함수
- */
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * 메뉴 버튼 추가
- */
 function addMenuButtons() {
     $('#broadcast_wand_container').remove();
     
@@ -839,9 +745,6 @@ function addMenuButtons() {
     $('#backup-btn').on('click', openBackupModal);
 }
 
-/**
- * 초기화
- */
 jQuery(async () => {
     console.log('[Broadcast] Extension loading...');
     
