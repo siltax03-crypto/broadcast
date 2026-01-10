@@ -72,11 +72,6 @@ function createSettingsUI() {
                             <span>백업 버튼 표시</span>
                         </label>
                     </div>
-                    <div class="broadcast-setting-item" style="margin: 10px 0;">
-                        <label style="display:block; margin-bottom:5px;">예상 페르소나 이름 (선택)</label>
-                        <input type="text" id="broadcast-persona" value="${extension_settings[extensionName].expectedPersona || ''}" placeholder="페르소나 이름 입력 (비워두면 검증 안함)" style="width: 100%; padding: 5px;">
-                        <small style="opacity:0.7; display:block; margin-top:3px;">브로드캐스트 시 페르소나가 맞는지 확인합니다</small>
-                    </div>
                 </div>
             </div>
         </div>
