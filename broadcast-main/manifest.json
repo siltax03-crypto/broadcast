@@ -1,0 +1,11 @@
+{
+    "display_name": "Broadcast Message",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "User",
+    "version": "3.2.0",
+    "description": "Broadcast messages, hide messages, and backup messages to other chat files"
+}
