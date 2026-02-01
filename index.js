@@ -28,7 +28,6 @@ let selectedChats = [];
 let currentBroadcastMessages = [];
 let currentMessageIndex = 0;
 let currentCharIndex = 0;
-
 let lastCheckedBackupIndex = null;
 
 function loadSettings() {
@@ -497,18 +496,29 @@ async function openBackupTargetSelector(selectedIndices) {
         
         const chatFiles = await response.json();
         
-        if (!chatFiles || chatFiles.length <= 1) {
-            toastr.info('이동할 수 있는 다른 채팅 파일이 없습니다.');
-            return;
-        }
-        
         const popupContent = `
             <div style="display:flex; flex-direction:column; gap:15px; min-width:400px;">
                 <h3 style="margin:0; text-align:center;">📁 대상 채팅 파일 선택</h3>
                 <p style="margin:0; text-align:center; opacity:0.8;">${selectedIndices.length}개 메시지를 복사합니다</p>
                 
                 <div style="max-height:250px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:5px; padding:10px; background:var(--SmartThemeBlurTintColor);">
-                    ${chatFiles.map((file) => {
+                    <label style="display:flex; align-items:center; gap:8px; padding:8px 5px; cursor:pointer; border-bottom:2px solid var(--SmartThemeQuoteColor); margin-bottom:10px; background:rgba(74,158,255,0.1); border-radius:5px;">
+                        <input type="radio" 
+                               name="backup-target" 
+                               class="backup-target-radio" 
+                               data-file-id="__NEW_FILE__"
+                               data-is-new="true"
+                               style="width:18px; height:18px;">
+                        <span style="color:var(--SmartThemeQuoteColor); font-weight:bold;">➕ 새 파일 생성</span>
+                    </label>
+                    
+                    <div id="new-file-name-container" style="display:none; padding:10px; margin-bottom:10px; border:1px dashed var(--SmartThemeQuoteColor); border-radius:5px; background:rgba(74,158,255,0.05);">
+                        <label style="display:block; margin-bottom:5px; font-size:13px;">새 파일 이름:</label>
+                        <input type="text" id="new-file-name-input" placeholder="파일 이름 입력 (비워두면 자동 생성)" 
+                               style="width:100%; padding:8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor);">
+                    </div>
+                    
+                    ${chatFiles && chatFiles.length > 0 ? chatFiles.map((file) => {
                         const fileId = file.file_id || removeJsonlExtension(file.file_name);
                         const displayName = file.file_name || fileId;
                         const isCurrent = fileId === currentChatFileId;
@@ -518,12 +528,13 @@ async function openBackupTargetSelector(selectedIndices) {
                                        name="backup-target" 
                                        class="backup-target-radio" 
                                        data-file-id="${fileId}"
+                                       data-is-new="false"
                                        ${isCurrent ? 'disabled' : ''}
                                        style="width:18px; height:18px;">
                                 <span>${displayName}${isCurrent ? ' (현재)' : ''}</span>
                             </label>
                         `;
-                    }).join('')}
+                    }).join('') : '<p style="opacity:0.7; text-align:center; padding:10px;">기존 채팅 파일이 없습니다. 새 파일을 생성하세요.</p>'}
                 </div>
                 
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
@@ -533,10 +544,22 @@ async function openBackupTargetSelector(selectedIndices) {
             </div>
         `;
         
+        $(document).off('change', '.backup-target-radio').on('change', '.backup-target-radio', function() {
+            const isNew = $(this).data('is-new') === true || $(this).data('is-new') === 'true';
+            if (isNew) {
+                $('#new-file-name-container').slideDown(200);
+                $('#new-file-name-input').focus();
+            } else {
+                $('#new-file-name-container').slideUp(200);
+            }
+        });
+        
         const result = await getCallPopup()(popupContent, 'confirm', '', { okButton: '실행', cancelButton: '취소' });
         
         if (result) {
-            const targetFileId = $('.backup-target-radio:checked').data('file-id');
+            const selectedRadio = $('.backup-target-radio:checked');
+            const targetFileId = selectedRadio.data('file-id');
+            const isNewFile = selectedRadio.data('is-new') === true || selectedRadio.data('is-new') === 'true';
             const deleteOriginal = $('#backup-delete-original').is(':checked');
             
             if (!targetFileId) {
@@ -544,12 +567,92 @@ async function openBackupTargetSelector(selectedIndices) {
                 return;
             }
             
-            await copyMessagesToFile(selectedIndices, targetFileId, currentChatFileId, deleteOriginal);
+            if (isNewFile) {
+                const newFileName = $('#new-file-name-input').val().trim();
+                await copyMessagesToNewFile(selectedIndices, newFileName, currentChatFileId, deleteOriginal);
+            } else {
+                await copyMessagesToFile(selectedIndices, targetFileId, currentChatFileId, deleteOriginal);
+            }
         }
         
     } catch (error) {
         console.error('[Broadcast] Error getting chat files:', error);
         toastr.error('채팅 파일 목록을 가져오는데 실패했습니다: ' + error.message);
+    }
+}
+
+async function copyMessagesToNewFile(indices, newFileName, currentFileId, deleteOriginal) {
+    const ctx = getContext();
+    const currentChat = ctx.chat;
+    
+    try {
+        toastr.info('새 채팅 파일 생성 중...');
+        
+        const sortedIndices = [...indices].sort((a, b) => a - b);
+        const messagesToCopy = sortedIndices.map(i => JSON.parse(JSON.stringify(currentChat[i])));
+        
+        await executeSlashCommands('/newchat');
+        await sleep(2000);
+        await waitForChatLoad();
+        
+        const currentCharId = ctx.characterId;
+        const currentCharacter = ctx.characters[currentCharId];
+        let newFileId = removeJsonlExtension(currentCharacter.chat);
+        
+        if (newFileName) {
+            try {
+                await executeSlashCommands(`/renamechat ${newFileName.trim()}`);
+                newFileId = newFileName.trim();
+                await sleep(500);
+            } catch (renameError) {
+                console.warn('[Broadcast] Rename error:', renameError);
+            }
+        }
+        
+        const newChat = ctx.chat;
+        for (const msg of messagesToCopy) {
+            newChat.push(msg);
+        }
+        
+        await ctx.saveChat();
+        await sleep(500);
+        
+        await ctx.reloadCurrentChat();
+        await sleep(500);
+        
+        if (deleteOriginal) {
+            await ctx.openCharacterChat(currentFileId);
+            await sleep(2000);
+            await waitForChatLoad();
+            
+            const currentChatNow = ctx.chat;
+            for (const index of [...indices].sort((a, b) => b - a)) {
+                if (index < currentChatNow.length) {
+                    currentChatNow.splice(index, 1);
+                }
+            }
+            await ctx.saveChat();
+            await ctx.reloadCurrentChat();
+            await sleep(500);
+            
+            await ctx.openCharacterChat(newFileId);
+            await sleep(2000);
+            await waitForChatLoad();
+        }
+        
+        const action = deleteOriginal ? '이동' : '복사';
+        const displayName = newFileName || newFileId;
+        toastr.success(`${messagesToCopy.length}개 메시지를 새 파일 "${displayName}"로 ${action}했습니다.`);
+        
+    } catch (error) {
+        console.error('[Broadcast] Error copying messages to new file:', error);
+        toastr.error(`메시지 처리 실패: ${error.message}`);
+        
+        try {
+            await ctx.openCharacterChat(currentFileId);
+        } catch (e) {
+            console.error('[Broadcast] Failed to return to original chat:', e);
+        }
     }
 }
 
@@ -563,26 +666,18 @@ async function copyMessagesToFile(indices, targetFileId, currentFileId, deleteOr
         const sortedIndices = [...indices].sort((a, b) => a - b);
         const messagesToCopy = sortedIndices.map(i => JSON.parse(JSON.stringify(currentChat[i])));
         
-        console.log('[Broadcast] Switching to target file:', targetFileId);
-        
         await ctx.openCharacterChat(targetFileId);
         await sleep(2000);
         
         await waitForChatLoad();
-        
-        console.log('[Broadcast] Target chat loaded, messages:', ctx.chat.length);
         
         const targetChat = ctx.chat;
         for (const msg of messagesToCopy) {
             targetChat.push(msg);
         }
         
-        console.log('[Broadcast] Messages added, saving...');
-        
         await ctx.saveChat();
         await sleep(500);
-        
-        console.log('[Broadcast] Saved, switching back to:', currentFileId);
         
         await ctx.openCharacterChat(currentFileId);
         await sleep(2000);
@@ -828,7 +923,6 @@ async function broadcastMessage(messages, autoHide) {
                         const chat = getContext().chat;
                         const allHidden = chat.slice(hideStart, hideEnd + 1).every(m => m.is_hidden);
                         if (!allHidden) {
-                            console.warn('[Broadcast] Hide verification failed, retrying...');
                             await executeSlashCommands(`/hide ${hideStart}-${hideEnd}`);
                             await sleep(500);
                         }
@@ -929,11 +1023,8 @@ async function verifyCurrentChat(expectedCharName, expectedPersona) {
     const normalizedCurrent = currentCharName.trim().toLowerCase();
     
     if (normalizedExpected !== normalizedCurrent) {
-        console.error(`[Broadcast] Character mismatch! Expected: ${expectedCharName}, Got: ${currentCharName}`);
         return false;
     }
-    
-    console.log(`[Broadcast] Character verified: ${currentCharName}`);
     
     if (expectedPersona && expectedPersona.trim()) {
         const currentPersona = ctx.name1 || '';
@@ -941,12 +1032,9 @@ async function verifyCurrentChat(expectedCharName, expectedPersona) {
         const normalizedCurrentPersona = currentPersona.trim().toLowerCase();
         
         if (normalizedExpectedPersona !== normalizedCurrentPersona) {
-            console.error(`[Broadcast] Persona mismatch! Expected: ${expectedPersona}, Got: ${currentPersona}`);
             toastr.error(`페르소나 불일치: ${expectedPersona} ≠ ${currentPersona}`);
             return false;
         }
-        
-        console.log(`[Broadcast] Persona verified: ${currentPersona}`);
     }
     
     return true;
@@ -970,7 +1058,6 @@ function waitForResponseComplete(maxWait = 600000) {
                 
                 if (generatingToast && !imageGenerating) {
                     imageGenerating = true;
-                    console.log('[Broadcast] Image generation detected, waiting for completion...');
                 }
                 
                 const typingIndicator = document.getElementById('typing_indicator');
@@ -984,7 +1071,6 @@ function waitForResponseComplete(maxWait = 600000) {
                 
                 if (imageGenerating) {
                     if (successToast) {
-                        console.log('[Broadcast] Image generation completed');
                         setTimeout(() => {
                             clearInterval(interval);
                             resolve(true);
@@ -996,14 +1082,12 @@ function waitForResponseComplete(maxWait = 600000) {
                 
                 if (textResponseDone && !generatingToast) {
                     clearInterval(interval);
-                    console.log('[Broadcast] Response completed (text only)');
                     resolve(true);
                     return;
                 }
                 
                 if (elapsed >= maxWait) {
                     clearInterval(interval);
-                    console.warn('[Broadcast] Max wait time exceeded');
                     resolve(false);
                 }
             }, checkInterval);
@@ -1043,14 +1127,10 @@ function addMenuButtons() {
 }
 
 jQuery(async () => {
-    console.log('[Broadcast] Extension loading...');
-    
     loadSettings();
     createSettingsUI();
     
     setTimeout(() => {
         addMenuButtons();
     }, 1000);
-    
-    console.log('[Broadcast] Extension loaded!');
 });
