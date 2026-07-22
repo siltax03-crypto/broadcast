@@ -10,6 +10,36 @@ const getContext = () => SillyTavern.getContext();
 const getCallPopup = () => getContext().callPopup;
 const executeSlashCommands = (cmd) => getContext().executeSlashCommands(cmd);
 
+/**
+ * callPopup 래퍼. 이 ST의 callPopup 은 구형 #dialogue_popup 을 재사용하고
+ * 버튼은 #dialogue_popup_ok / #dialogue_popup_cancel (.menu_button div) 이다.
+ * 우리 팝업이 떠 있는 동안만 그 버튼에 전용 클래스를 심어서(닫히면 제거)
+ * ST 기본 .menu_button 회색·세로뭉갬을 우리 클래스로 덮고, 다른 ST 팝업엔 영향 없게 한다.
+ */
+function bcxStampDialogueButtons(on) {
+    const ok = document.getElementById('dialogue_popup_ok');
+    const cancel = document.getElementById('dialogue_popup_cancel');
+    if (on) {
+        ok?.classList.add('bcx-btn', 'bcx-btn-ok');
+        cancel?.classList.add('bcx-btn', 'bcx-btn-cancel');
+    } else {
+        ok?.classList.remove('bcx-btn', 'bcx-btn-ok');
+        cancel?.classList.remove('bcx-btn', 'bcx-btn-cancel');
+    }
+}
+
+function bcxCallPopup(content, type, inputValue = '', options = {}) {
+    const promise = getCallPopup()(content, type, inputValue, options);
+    // 렌더 타이밍 편차 대비해 두어 번 심는다
+    requestAnimationFrame(() => bcxStampDialogueButtons(true));
+    setTimeout(() => bcxStampDialogueButtons(true), 0);
+    setTimeout(() => bcxStampDialogueButtons(true), 50);
+    // 닫히면(프라미스 resolve) 원복
+    return Promise.resolve(promise).finally(() => {
+        setTimeout(() => bcxStampDialogueButtons(false), 100);
+    });
+}
+
 const extensionName = 'broadcast-message';
 
 const defaultSettings = {
@@ -17,6 +47,7 @@ const defaultSettings = {
     showBroadcastBtn: true,
     showHideBtn: true,
     showBackupBtn: true,
+    showSimulBtn: true,
     expectedPersona: '',
     messageCount: 1,
 };
@@ -29,6 +60,66 @@ let currentBroadcastMessages = [];
 let currentMessageIndex = 0;
 let currentCharIndex = 0;
 let lastCheckedBackupIndex = null;
+
+// ==================== 모바일/뷰포트 유틸 ====================
+
+const MOBILE_QUERY = '(max-width: 520px)';
+const pinnedPanels = new Map();
+
+function isMobileUI() {
+    return window.matchMedia(MOBILE_QUERY).matches;
+}
+
+/**
+ * fixed 패널을 실제 보이는 영역(visualViewport)에 고정한다.
+ * 모바일 키보드가 올라와도 패널이 화면 밖으로 밀리지 않는다.
+ * 데스크톱 폭에서는 인라인 좌표를 지워 CSS 배치로 되돌린다.
+ */
+function pinToViewport(el, mode = 'fill') {
+    if (!el) return;
+    const vv = window.visualViewport;
+
+    const apply = () => {
+        if (!el.isConnected) return unpinFromViewport(el);
+
+        if (!vv || !isMobileUI()) {
+            el.style.top = el.style.left = el.style.right = el.style.bottom = '';
+            el.style.width = el.style.height = '';
+            return;
+        }
+
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.left = `${vv.offsetLeft}px`;
+        el.style.width = `${vv.width}px`;
+
+        if (mode === 'fill') {
+            el.style.top = `${vv.offsetTop}px`;
+            el.style.height = `${vv.height}px`;
+        } else {
+            // 'dock': 보이는 영역 하단에 붙인다
+            el.style.height = '';
+            el.style.left = `${vv.offsetLeft + 8}px`;
+            el.style.width = `${vv.width - 16}px`;
+            el.style.top = `${vv.offsetTop + vv.height - el.offsetHeight - 8}px`;
+        }
+    };
+
+    apply();
+    vv?.addEventListener('resize', apply);
+    vv?.addEventListener('scroll', apply);
+    window.addEventListener('resize', apply);
+    pinnedPanels.set(el, apply);
+}
+
+function unpinFromViewport(el) {
+    const apply = pinnedPanels.get(el);
+    if (!apply) return;
+    window.visualViewport?.removeEventListener('resize', apply);
+    window.visualViewport?.removeEventListener('scroll', apply);
+    window.removeEventListener('resize', apply);
+    pinnedPanels.delete(el);
+}
 
 function loadSettings() {
     extension_settings[extensionName] = extension_settings[extensionName] || {};
@@ -49,28 +140,23 @@ function createSettingsUI() {
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
-                    <div class="broadcast-setting-item" style="margin: 10px 0;">
-                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <div class="bcx-settings-item">
+                        <label class="bcx-inline-label">
                             <input type="checkbox" id="broadcast-show-broadcast-btn" ${extension_settings[extensionName].showBroadcastBtn ? 'checked' : ''}>
                             <span>브로드캐스트 버튼 표시</span>
                         </label>
                     </div>
-                    <div class="broadcast-setting-item" style="margin: 10px 0;">
-                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <div class="bcx-settings-item">
+                        <label class="bcx-inline-label">
                             <input type="checkbox" id="broadcast-show-hide-btn" ${extension_settings[extensionName].showHideBtn ? 'checked' : ''}>
                             <span>메시지 숨기기 버튼 표시</span>
                         </label>
                     </div>
-                    <div class="broadcast-setting-item" style="margin: 10px 0;">
-                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <div class="bcx-settings-item">
+                        <label class="bcx-inline-label">
                             <input type="checkbox" id="broadcast-show-backup-btn" ${extension_settings[extensionName].showBackupBtn ? 'checked' : ''}>
                             <span>백업 버튼 표시</span>
                         </label>
-                    </div>
-                    <div class="broadcast-setting-item" style="margin: 10px 0;">
-                        <label style="display:block; margin-bottom:5px;">예상 페르소나 이름 (선택)</label>
-                        <input type="text" id="broadcast-persona" value="${extension_settings[extensionName].expectedPersona || ''}" placeholder="페르소나 이름 입력 (비워두면 검증 안함)" style="width: 100%; padding: 5px;">
-                        <small style="opacity:0.7; display:block; margin-top:3px;">브로드캐스트 시 페르소나가 맞는지 확인합니다</small>
                     </div>
                 </div>
             </div>
@@ -95,11 +181,6 @@ function createSettingsUI() {
         extension_settings[extensionName].showBackupBtn = this.checked;
         saveSettingsDebounced();
         updateButtonVisibility();
-    });
-    
-    $('#broadcast-persona').on('change', function() {
-        extension_settings[extensionName].expectedPersona = this.value.trim();
-        saveSettingsDebounced();
     });
 }
 
@@ -158,45 +239,43 @@ async function openChatSelector() {
     const savedMessageCount = extension_settings[extensionName].messageCount || 1;
     
     const popupContent = `
-        <div style="display:flex; flex-direction:column; gap:15px; min-width:450px;">
-            <h3 style="margin:0; text-align:center;">📢 브로드캐스트 메시지</h3>
-            
-            <div style="max-height:200px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:5px; padding:10px; background:var(--SmartThemeBlurTintColor);">
-                <label style="display:flex; align-items:center; gap:8px; padding:5px; cursor:pointer; border-bottom:1px solid var(--SmartThemeBorderColor); margin-bottom:10px;">
-                    <input type="checkbox" id="broadcast-select-all" style="width:18px; height:18px;">
-                    <span style="font-weight:bold;">전체 선택</span>
+        <div class="bcx-pop bcx-pop--lg">
+            <h3 class="bcx-title">📢 브로드캐스트 메시지</h3>
+
+            <div class="bcx-list">
+                <label class="bcx-row bcx-row--head">
+                    <input type="checkbox" class="bcx-check" id="broadcast-select-all">
+                    <span>전체 선택</span>
                 </label>
                 ${chats.map((chatItem, index) => `
-                    <label style="display:flex; align-items:center; gap:8px; padding:5px; cursor:pointer;">
-                        <input type="checkbox" 
-                               class="broadcast-chat-checkbox" 
+                    <label class="bcx-row">
+                        <input type="checkbox"
+                               class="bcx-check broadcast-chat-checkbox"
                                data-index="${index}"
                                data-chid="${chatItem.chid || ''}"
                                data-grid="${chatItem.grid || ''}"
                                data-name="${chatItem.name}"
-                               data-is-group="${chatItem.isGroup || false}"
-                               style="width:18px; height:18px;">
-                        <span>${chatItem.isGroup ? '👥 ' : ''}${chatItem.name}</span>
+                               data-is-group="${chatItem.isGroup || false}">
+                        <span class="bcx-row-text">${chatItem.isGroup ? '👥 ' : ''}${chatItem.name}</span>
                     </label>
                 `).join('')}
             </div>
-            
-            <div>
-                <label style="display:block; margin-bottom:5px;">캐릭터당 메시지 개수:</label>
-                <input type="number" id="broadcast-message-count" min="1" max="10" value="${savedMessageCount}" 
-                       style="width:100%; padding:8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor);">
-                <small style="opacity:0.7; display:block; margin-top:3px;">각 캐릭터에서 순차적으로 N개 메시지를 보내고 각각 숨김 처리합니다</small>
+
+            <div class="bcx-field">
+                <label class="bcx-label">캐릭터당 메시지 개수</label>
+                <input type="number" class="bcx-input" id="broadcast-message-count" min="1" max="10" value="${savedMessageCount}">
+                <small class="bcx-hint">각 캐릭터에서 순차적으로 N개 메시지를 보내고 각각 숨김 처리합니다</small>
             </div>
-            
-            <div id="broadcast-messages-container">
-                <label style="display:block; margin-bottom:5px;">보낼 메시지:</label>
-                <div id="broadcast-message-inputs">
-                    <textarea class="broadcast-message-input" data-msg-index="0" rows="2" style="width:100%; padding:8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor); resize:vertical; margin-bottom:5px;" placeholder="메시지 1"></textarea>
+
+            <div class="bcx-field" id="broadcast-messages-container">
+                <label class="bcx-label">보낼 메시지</label>
+                <div class="bcx-stack" id="broadcast-message-inputs">
+                    <textarea class="bcx-textarea broadcast-message-input" data-msg-index="0" rows="2" placeholder="메시지 1"></textarea>
                 </div>
             </div>
-            
-            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                <input type="checkbox" id="broadcast-auto-hide" ${extension_settings[extensionName].autoHide ? 'checked' : ''} style="width:18px; height:18px;">
+
+            <label class="bcx-inline-label">
+                <input type="checkbox" class="bcx-check" id="broadcast-auto-hide" ${extension_settings[extensionName].autoHide ? 'checked' : ''}>
                 <span>보낸 메시지와 응답 자동 숨김</span>
             </label>
         </div>
@@ -211,7 +290,7 @@ async function openChatSelector() {
         updateMessageInputs(count);
     });
     
-    const result = await getCallPopup()(popupContent, 'confirm', '', { okButton: '전송', cancelButton: '취소' });
+    const result = await bcxCallPopup(popupContent, 'confirm', '', { okButton: '전송', cancelButton: '취소' });
     
     if (result) {
         const messageCount = parseInt($('#broadcast-message-count').val(), 10) || 1;
@@ -267,8 +346,7 @@ function updateMessageInputs(count) {
     if (count > currentCount) {
         for (let i = currentCount; i < count; i++) {
             container.append(`
-                <textarea class="broadcast-message-input" data-msg-index="${i}" rows="2" 
-                    style="width:100%; padding:8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor); resize:vertical; margin-bottom:5px;" 
+                <textarea class="bcx-textarea broadcast-message-input" data-msg-index="${i}" rows="2"
                     placeholder="메시지 ${i + 1}"></textarea>
             `);
         }
@@ -281,19 +359,18 @@ function updateMessageInputs(count) {
 
 async function openHideModal() {
     const popupContent = `
-        <div style="display:flex; flex-direction:column; gap:15px; min-width:300px;">
-            <h3 style="margin:0; text-align:center;">🙈 메시지 숨기기</h3>
-            
-            <div>
-                <label style="display:block; margin-bottom:5px;">숨길 메시지 개수:</label>
-                <input type="number" id="hide-count" min="1" max="100" value="2" 
-                       style="width:100%; padding:10px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor); font-size:16px;">
-                <small style="color:var(--SmartThemeBodyColor); opacity:0.7; margin-top:5px; display:block;">마지막 메시지부터 숨깁니다</small>
+        <div class="bcx-pop bcx-pop--sm">
+            <h3 class="bcx-title">🙈 메시지 숨기기</h3>
+
+            <div class="bcx-field">
+                <label class="bcx-label">숨길 메시지 개수</label>
+                <input type="number" class="bcx-input" id="hide-count" min="1" max="100" value="2">
+                <small class="bcx-hint">마지막 메시지부터 숨깁니다</small>
             </div>
         </div>
     `;
     
-    const result = await getCallPopup()(popupContent, 'confirm', '', { okButton: '숨기기', cancelButton: '취소' });
+    const result = await bcxCallPopup(popupContent, 'confirm', '', { okButton: '숨기기', cancelButton: '취소' });
     
     if (result) {
         const count = parseInt($('#hide-count').val(), 10);
@@ -352,41 +429,40 @@ async function openBackupModal() {
     const reversedChat = [...currentChat].reverse();
     
     const popupContent = `
-        <div style="display:flex; flex-direction:column; gap:15px; min-width:500px; max-width:600px;">
-            <h3 style="margin:0; text-align:center;">📦 메시지 백업</h3>
-            
-            <div style="display:flex; flex-direction:column; gap:8px; align-items:center;">
-                <div style="display:flex; gap:8px; align-items:center;">
-                    <button id="backup-select-range-btn" class="menu_button" style="padding:5px 12px; font-size:12px; white-space:nowrap;">📍 범위 선택</button>
-                    <div style="display:flex; gap:5px; align-items:center; background:var(--SmartThemeBlurTintColor); padding:4px 8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor);">
-                        <input type="number" id="backup-range-start" placeholder="시작" style="width:50px; padding:4px; border-radius:4px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBodyColor); color:var(--SmartThemeBlurTintColor); text-align:center;">
-                        <span style="opacity:0.6;">~</span>
-                        <input type="number" id="backup-range-end" placeholder="끝" style="width:50px; padding:4px; border-radius:4px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBodyColor); color:var(--SmartThemeBlurTintColor); text-align:center;">
+        <div class="bcx-pop bcx-pop--xl">
+            <h3 class="bcx-title">📦 메시지 백업</h3>
+
+            <div class="bcx-field">
+                <div class="bcx-range">
+                    <button id="backup-select-range-btn" class="menu_button bcx-chip">📍 범위 선택</button>
+                    <div class="bcx-range-box">
+                        <input type="number" id="backup-range-start" placeholder="시작">
+                        <span style="opacity:.6;">~</span>
+                        <input type="number" id="backup-range-end" placeholder="끝">
                     </div>
-                    <button id="backup-apply-range-btn" class="menu_button" style="padding:5px 12px; font-size:12px; white-space:nowrap;">✓ 적용</button>
+                    <button id="backup-apply-range-btn" class="menu_button bcx-chip">✓ 적용</button>
                 </div>
-                <small style="opacity:0.5; font-size:11px;">💡 Shift+클릭 또는 인덱스 직접 입력</small>
+                <small class="bcx-hint" style="text-align:center;">💡 Shift+클릭 또는 인덱스 직접 입력</small>
             </div>
-            
-            <div style="max-height:300px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:5px; padding:10px; background:var(--SmartThemeBlurTintColor);">
-                <label style="display:flex; align-items:center; gap:8px; padding:5px; cursor:pointer; border-bottom:1px solid var(--SmartThemeBorderColor); margin-bottom:10px;">
-                    <input type="checkbox" id="backup-select-all" style="width:18px; height:18px;">
-                    <span style="font-weight:bold;">전체 선택</span>
+
+            <div class="bcx-list">
+                <label class="bcx-row bcx-row--head">
+                    <input type="checkbox" class="bcx-check" id="backup-select-all">
+                    <span>전체 선택</span>
                 </label>
                 ${reversedChat.map((msg, displayIndex) => {
                     const realIndex = currentChat.length - 1 - displayIndex;
                     return `
-                        <label style="display:flex; align-items:flex-start; gap:8px; padding:8px 5px; cursor:pointer; border-bottom:1px solid rgba(255,255,255,0.1);" data-real-index="${realIndex}">
-                            <input type="checkbox" 
-                                   class="backup-msg-checkbox" 
+                        <label class="bcx-row bcx-row--top" data-real-index="${realIndex}">
+                            <input type="checkbox"
+                                   class="bcx-check backup-msg-checkbox"
                                    data-index="${realIndex}"
-                                   data-display-index="${displayIndex}"
-                                   style="width:18px; height:18px; flex-shrink:0; margin-top:2px;">
-                            <div style="flex:1; overflow:hidden;">
-                                <div style="font-weight:bold; color:${msg.is_user ? '#6eb5ff' : '#ffa500'};">
+                                   data-display-index="${displayIndex}">
+                            <div class="bcx-row-text">
+                                <div class="bcx-row-name ${msg.is_user ? 'is-user' : 'is-char'}">
                                     [${realIndex}] ${msg.name || (msg.is_user ? 'User' : 'Character')}
                                 </div>
-                                <div style="font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:400px;">
+                                <div class="bcx-row-preview">
                                     ${(msg.mes || '').substring(0, 100)}${(msg.mes || '').length > 100 ? '...' : ''}
                                 </div>
                             </div>
@@ -394,8 +470,8 @@ async function openBackupModal() {
                     `;
                 }).join('')}
             </div>
-            
-            <small style="color:var(--SmartThemeBodyColor); opacity:0.7;">이동할 메시지를 선택하세요 (최신순)</small>
+
+            <small class="bcx-hint">이동할 메시지를 선택하세요 (최신순)</small>
         </div>
     `;
     
@@ -444,7 +520,7 @@ async function openBackupModal() {
         toastr.success(`인덱스 ${minIdx}~${maxIdx} 범위 선택됨`);
     });
     
-    const result = await getCallPopup()(popupContent, 'confirm', '', { okButton: '다음', cancelButton: '취소', wide: true });
+    const result = await bcxCallPopup(popupContent, 'confirm', '', { okButton: '다음', cancelButton: '취소', wide: true });
     
     if (result) {
         const selectedIndices = [];
@@ -497,48 +573,45 @@ async function openBackupTargetSelector(selectedIndices) {
         const chatFiles = await response.json();
         
         const popupContent = `
-            <div style="display:flex; flex-direction:column; gap:15px; min-width:400px;">
-                <h3 style="margin:0; text-align:center;">📁 대상 채팅 파일 선택</h3>
-                <p style="margin:0; text-align:center; opacity:0.8;">${selectedIndices.length}개 메시지를 복사합니다</p>
-                
-                <div style="max-height:250px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:5px; padding:10px; background:var(--SmartThemeBlurTintColor);">
-                    <label style="display:flex; align-items:center; gap:8px; padding:8px 5px; cursor:pointer; border-bottom:2px solid var(--SmartThemeQuoteColor); margin-bottom:10px; background:rgba(74,158,255,0.1); border-radius:5px;">
-                        <input type="radio" 
-                               name="backup-target" 
-                               class="backup-target-radio" 
+            <div class="bcx-pop bcx-pop--md">
+                <h3 class="bcx-title">📁 대상 채팅 파일 선택</h3>
+                <p class="bcx-sub">${selectedIndices.length}개 메시지를 복사합니다</p>
+
+                <div class="bcx-list">
+                    <label class="bcx-row bcx-row--new">
+                        <input type="radio"
+                               name="backup-target"
+                               class="bcx-check backup-target-radio"
                                data-file-id="__NEW_FILE__"
-                               data-is-new="true"
-                               style="width:18px; height:18px;">
-                        <span style="color:var(--SmartThemeQuoteColor); font-weight:bold;">➕ 새 파일 생성</span>
+                               data-is-new="true">
+                        <span class="bcx-row-text">➕ 새 파일 생성</span>
                     </label>
-                    
-                    <div id="new-file-name-container" style="display:none; padding:10px; margin-bottom:10px; border:1px dashed var(--SmartThemeQuoteColor); border-radius:5px; background:rgba(74,158,255,0.05);">
-                        <label style="display:block; margin-bottom:5px; font-size:13px;">새 파일 이름:</label>
-                        <input type="text" id="new-file-name-input" placeholder="파일 이름 입력 (비워두면 자동 생성)" 
-                               style="width:100%; padding:8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor);">
+
+                    <div class="bcx-newfile" id="new-file-name-container" style="display:none;">
+                        <label class="bcx-label" style="display:block; margin-bottom:6px;">새 파일 이름</label>
+                        <input type="text" class="bcx-input" id="new-file-name-input" placeholder="파일 이름 입력 (비워두면 자동 생성)">
                     </div>
-                    
+
                     ${chatFiles && chatFiles.length > 0 ? chatFiles.map((file) => {
                         const fileId = file.file_id || removeJsonlExtension(file.file_name);
                         const displayName = file.file_name || fileId;
                         const isCurrent = fileId === currentChatFileId;
                         return `
-                            <label style="display:flex; align-items:center; gap:8px; padding:8px 5px; cursor:${isCurrent ? 'not-allowed' : 'pointer'}; opacity:${isCurrent ? '0.5' : '1'}; border-bottom:1px solid rgba(255,255,255,0.1);">
-                                <input type="radio" 
-                                       name="backup-target" 
-                                       class="backup-target-radio" 
+                            <label class="bcx-row ${isCurrent ? 'bcx-row--disabled' : ''}">
+                                <input type="radio"
+                                       name="backup-target"
+                                       class="bcx-check backup-target-radio"
                                        data-file-id="${fileId}"
                                        data-is-new="false"
-                                       ${isCurrent ? 'disabled' : ''}
-                                       style="width:18px; height:18px;">
-                                <span>${displayName}${isCurrent ? ' (현재)' : ''}</span>
+                                       ${isCurrent ? 'disabled' : ''}>
+                                <span class="bcx-row-text">${displayName}${isCurrent ? ' (현재)' : ''}</span>
                             </label>
                         `;
-                    }).join('') : '<p style="opacity:0.7; text-align:center; padding:10px;">기존 채팅 파일이 없습니다. 새 파일을 생성하세요.</p>'}
+                    }).join('') : '<p class="bcx-empty">기존 채팅 파일이 없습니다. 새 파일을 생성하세요.</p>'}
                 </div>
-                
-                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                    <input type="checkbox" id="backup-delete-original" style="width:18px; height:18px;">
+
+                <label class="bcx-inline-label">
+                    <input type="checkbox" class="bcx-check" id="backup-delete-original">
                     <span>원본 메시지 삭제 (이동)</span>
                 </label>
             </div>
@@ -554,7 +627,7 @@ async function openBackupTargetSelector(selectedIndices) {
             }
         });
         
-        const result = await getCallPopup()(popupContent, 'confirm', '', { okButton: '실행', cancelButton: '취소' });
+        const result = await bcxCallPopup(popupContent, 'confirm', '', { okButton: '실행', cancelButton: '취소' });
         
         if (result) {
             const selectedRadio = $('.backup-target-radio:checked');
@@ -734,43 +807,26 @@ function showBroadcastControlPanel() {
     $('#broadcast-control-panel').remove();
     
     const panelHtml = `
-        <div id="broadcast-control-panel" style="
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            padding: 15px 20px;
-            background: var(--SmartThemeBlurTintColor, #1a1a2e);
-            border: 2px solid var(--SmartThemeBorderColor, #444);
-            border-radius: 10px;
-            color: var(--SmartThemeBodyColor, #fff);
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-            z-index: 10000;
-            min-width: 300px;
-        ">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                <span style="font-weight:bold;">📢 브로드캐스트 진행 중</span>
-                <span id="broadcast-progress-text">0/0</span>
+        <div id="broadcast-control-panel">
+            <div class="bcx-cp-top">
+                <span>📢 브로드캐스트 진행 중</span>
+                <span class="bcx-cp-count" id="broadcast-progress-text">0/0</span>
             </div>
-            <div id="broadcast-status" style="margin-bottom:10px; font-size:13px; opacity:0.9;">준비 중...</div>
-            <div style="height:6px; background:var(--SmartThemeBorderColor); border-radius:3px; overflow:hidden; margin-bottom:15px;">
-                <div id="broadcast-progress-bar" style="height:100%; width:0%; background:var(--SmartThemeQuoteColor, #4a9eff); transition:width 0.3s;"></div>
+            <div class="bcx-cp-status" id="broadcast-status">준비 중...</div>
+            <div class="bcx-cp-track">
+                <div class="bcx-cp-fill" id="broadcast-progress-bar"></div>
             </div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                <button id="broadcast-pause-btn" class="menu_button" style="flex:1; padding:8px; min-width:80px;">
-                    ⏸️ 일시정지
-                </button>
-                <button id="broadcast-edit-btn" class="menu_button" style="flex:1; padding:8px; min-width:80px;">
-                    ✏️ 메시지 수정
-                </button>
-                <button id="broadcast-stop-btn" class="menu_button" style="flex:1; padding:8px; min-width:80px; background:#ff4444;">
-                    ⏹️ 중지
-                </button>
+            <div class="bcx-cp-actions">
+                <button id="broadcast-pause-btn" class="menu_button">⏸️ 일시정지</button>
+                <button id="broadcast-edit-btn" class="menu_button">✏️ 수정</button>
+                <button id="broadcast-stop-btn" class="menu_button bcx-cp-stop">⏹️ 중지</button>
             </div>
         </div>
     `;
-    
+
     $('body').append(panelHtml);
-    
+    pinToViewport(document.getElementById('broadcast-control-panel'), 'dock');
+
     $('#broadcast-pause-btn').on('click', function() {
         isPaused = !isPaused;
         $(this).html(isPaused ? '▶️ 계속' : '⏸️ 일시정지');
@@ -778,7 +834,7 @@ function showBroadcastControlPanel() {
     });
     
     $('#broadcast-stop-btn').on('click', async function() {
-        const confirmed = await getCallPopup()('브로드캐스트를 중지하시겠습니까?', 'confirm', '', { okButton: '중지', cancelButton: '취소' });
+        const confirmed = await bcxCallPopup('브로드캐스트를 중지하시겠습니까?', 'confirm', '', { okButton: '중지', cancelButton: '취소' });
         if (confirmed) {
             shouldStop = true;
             isPaused = false;
@@ -796,24 +852,22 @@ function showBroadcastControlPanel() {
 
 async function openMessageEditPopup() {
     const popupContent = `
-        <div style="display:flex; flex-direction:column; gap:15px; min-width:400px;">
-            <h3 style="margin:0; text-align:center;">✏️ 메시지 수정</h3>
-            <small style="text-align:center; opacity:0.7;">수정 후 계속 진행하면 남은 캐릭터들에게 수정된 메시지가 전송됩니다</small>
-            
-            <div id="edit-message-inputs">
+        <div class="bcx-pop bcx-pop--md">
+            <h3 class="bcx-title">✏️ 메시지 수정</h3>
+            <small class="bcx-sub">수정 후 계속 진행하면 남은 캐릭터들에게 수정된 메시지가 전송됩니다</small>
+
+            <div class="bcx-stack" id="edit-message-inputs">
                 ${currentBroadcastMessages.map((msg, idx) => `
-                    <div style="margin-bottom:10px;">
-                        <label style="display:block; margin-bottom:5px;">메시지 ${idx + 1}${idx === currentMessageIndex ? ' (현재)' : ''}:</label>
-                        <textarea class="edit-broadcast-message" data-msg-index="${idx}" rows="2" 
-                            style="width:100%; padding:8px; border-radius:5px; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); color:var(--SmartThemeBodyColor); resize:vertical;"
-                        >${msg}</textarea>
+                    <div class="bcx-field">
+                        <label class="bcx-label">메시지 ${idx + 1}${idx === currentMessageIndex ? ' (현재)' : ''}</label>
+                        <textarea class="bcx-textarea edit-broadcast-message" data-msg-index="${idx}" rows="2">${msg}</textarea>
                     </div>
                 `).join('')}
             </div>
         </div>
     `;
     
-    const result = await getCallPopup()(popupContent, 'confirm', '', { okButton: '저장 후 계속', cancelButton: '취소' });
+    const result = await bcxCallPopup(popupContent, 'confirm', '', { okButton: '저장 후 계속', cancelButton: '취소' });
     
     if (result) {
         $('.edit-broadcast-message').each(function() {
@@ -838,6 +892,8 @@ function updateControlPanel(charIndex, msgIndex, totalChars, totalMsgs, charName
 }
 
 function hideControlPanel() {
+    const el = document.getElementById('broadcast-control-panel');
+    if (el) unpinFromViewport(el);
     $('#broadcast-control-panel').remove();
 }
 
@@ -1099,6 +1155,355 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ==================== 시뮬레이션 기능 ====================
+
+let isSimulating = false;
+let simulTargetFileId = null;
+let simulTargetIsNew = false;
+let simulTargetNewName = '';
+let simulCollectedMessages = [];
+let simulOriginalChatFileId = null;
+
+async function openSimulFileSelector() {
+    if (isSimulating) {
+        toastr.warning('이미 시뮬레이션이 진행 중입니다.');
+        return;
+    }
+
+    const ctx = getContext();
+    const currentCharId = ctx.characterId;
+    if (currentCharId === undefined) {
+        toastr.error('캐릭터를 먼저 선택해주세요.');
+        return;
+    }
+
+    const currentCharacter = ctx.characters[currentCharId];
+    if (!currentCharacter) {
+        toastr.error('현재 캐릭터를 찾을 수 없습니다.');
+        return;
+    }
+
+    const currentChatFileId = removeJsonlExtension(currentCharacter.chat);
+
+    try {
+        const response = await fetch('/api/characters/chats', {
+            method: 'POST',
+            headers: ctx.getRequestHeaders(),
+            body: JSON.stringify({
+                avatar_url: currentCharacter.avatar,
+                simple: true,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error('채팅 목록을 가져올 수 없습니다.');
+        }
+
+        const chatFiles = await response.json();
+
+        const popupContent = `
+            <div class="bcx-pop bcx-pop--md">
+                <h3 class="bcx-title">🧪 시뮬레이션 - 저장 파일 선택</h3>
+                <p class="bcx-sub">시뮬 결과가 저장될 파일을 선택하세요 (현재 채팅은 유지됩니다)</p>
+
+                <div class="bcx-list">
+                    <label class="bcx-row bcx-row--new">
+                        <input type="radio"
+                               name="simul-target"
+                               class="bcx-check simul-target-radio"
+                               data-file-id="__NEW_FILE__"
+                               data-is-new="true">
+                        <span class="bcx-row-text">➕ 새 파일 생성</span>
+                    </label>
+
+                    <div class="bcx-newfile" id="simul-new-file-name-container" style="display:none;">
+                        <label class="bcx-label" style="display:block; margin-bottom:6px;">새 파일 이름</label>
+                        <input type="text" class="bcx-input" id="simul-new-file-name-input" placeholder="파일 이름 입력 (비워두면 자동 생성)">
+                    </div>
+
+                    ${chatFiles && chatFiles.length > 0 ? chatFiles.map((file) => {
+                        const fileId = file.file_id || removeJsonlExtension(file.file_name);
+                        const displayName = file.file_name || fileId;
+                        const isCurrent = fileId === currentChatFileId;
+                        return `
+                            <label class="bcx-row">
+                                <input type="radio"
+                                       name="simul-target"
+                                       class="bcx-check simul-target-radio"
+                                       data-file-id="${fileId}"
+                                       data-is-new="false">
+                                <span class="bcx-row-text">${displayName}${isCurrent ? ' (현재)' : ''}</span>
+                            </label>
+                        `;
+                    }).join('') : '<p class="bcx-empty">기존 채팅 파일이 없습니다. 새 파일을 생성하세요.</p>'}
+                </div>
+            </div>
+        `;
+
+        $(document).off('change', '.simul-target-radio').on('change', '.simul-target-radio', function () {
+            const isNew = $(this).data('is-new') === true || $(this).data('is-new') === 'true';
+            if (isNew) {
+                $('#simul-new-file-name-container').slideDown(200);
+                $('#simul-new-file-name-input').focus();
+            } else {
+                $('#simul-new-file-name-container').slideUp(200);
+            }
+        });
+
+        const result = await bcxCallPopup(popupContent, 'confirm', '', { okButton: '시작', cancelButton: '취소' });
+
+        if (result) {
+            const selectedRadio = $('.simul-target-radio:checked');
+            const targetFileId = selectedRadio.data('file-id');
+            const isNewFile = selectedRadio.data('is-new') === true || selectedRadio.data('is-new') === 'true';
+
+            if (!targetFileId) {
+                toastr.warning('대상 파일을 선택해주세요.');
+                return;
+            }
+
+            simulOriginalChatFileId = currentChatFileId;
+            simulTargetIsNew = isNewFile;
+            simulTargetNewName = isNewFile ? ($('#simul-new-file-name-input').val().trim() || '') : '';
+            simulTargetFileId = isNewFile ? null : targetFileId;
+            simulCollectedMessages = [];
+
+            showSimulPanel();
+        }
+    } catch (error) {
+        console.error('[Broadcast] Simul file selector error:', error);
+        toastr.error('파일 목록 가져오기 실패: ' + error.message);
+    }
+}
+
+function showSimulPanel() {
+    isSimulating = true;
+    $('#simul-panel').remove();
+
+    const panelHtml = `
+        <div id="simul-panel">
+            <div class="simul-panel-header">
+                <span class="simul-panel-title">🧪 시뮬레이션</span>
+                <span class="simul-msg-count" id="simul-msg-count">0건</span>
+                <button id="simul-close-btn" class="menu_button simul-header-btn" title="종료">✕</button>
+            </div>
+            <div id="simul-response-area">
+                <div class="simul-placeholder">메시지를 입력하고 전송하면 응답이 여기에 표시됩니다.<br><small style="opacity:0.6;">현재 채팅에서 전송되고, 결과는 선택한 파일에 저장됩니다.</small></div>
+            </div>
+            <div class="simul-input-area">
+                <textarea id="simul-message-input" rows="3" placeholder="메시지를 입력하세요... (Ctrl+Enter로 전송)"></textarea>
+                <div class="simul-input-actions">
+                    <button id="simul-send-btn" class="menu_button simul-send-btn">전송</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('body').append(panelHtml);
+    pinToViewport(document.getElementById('simul-panel'), 'fill');
+
+    $('#simul-send-btn').on('click', handleSimulSend);
+    $('#simul-message-input').on('keydown', function (e) {
+        if (e.ctrlKey && e.key === 'Enter') {
+            handleSimulSend();
+        }
+    });
+
+    $('#simul-close-btn').on('click', async function () {
+        const msgInfo = simulCollectedMessages.length > 0
+            ? `\n\n수집된 ${simulCollectedMessages.length}건의 메시지를 선택한 파일에 저장합니다.`
+            : '';
+        const confirmed = await bcxCallPopup(`시뮬레이션을 종료하시겠습니까?${msgInfo}`, 'confirm', '', { okButton: '종료 및 저장', cancelButton: '취소' });
+        if (confirmed) {
+            await saveSimulMessages();
+            closeSimulPanel();
+        }
+    });
+}
+
+async function handleSimulSend() {
+    const message = $('#simul-message-input').val().trim();
+    if (!message) {
+        toastr.warning('메시지를 입력해주세요.');
+        return;
+    }
+
+    $('#simul-send-btn').prop('disabled', true).text('전송 중...');
+    $('#simul-message-input').prop('disabled', true);
+
+    const responseArea = $('#simul-response-area');
+    responseArea.find('.simul-placeholder').remove();
+
+    const userMsgHtml = `
+        <div class="simul-message simul-message-user">
+            <div class="simul-message-sender">📝 나</div>
+            <div class="simul-message-content">${escapeHtml(message)}</div>
+        </div>
+    `;
+    responseArea.append(userMsgHtml);
+
+    const waitingHtml = `<div class="simul-message simul-message-char" id="simul-waiting">
+        <div class="simul-message-sender">💬 응답 대기 중...</div>
+        <div class="simul-message-content simul-typing">...</div>
+    </div>`;
+    responseArea.append(waitingHtml);
+    responseArea.scrollTop(responseArea[0].scrollHeight);
+
+    const msgCountBefore = getContext().chat.length;
+
+    $('#send_textarea').val(message);
+    $('#send_but').trigger('click');
+
+    $('#simul-message-input').val('');
+
+    await waitForResponseComplete();
+    await sleep(500);
+
+    const currentChat = getContext().chat;
+    $('#simul-waiting').remove();
+
+    if (currentChat.length > msgCountBefore) {
+        for (let i = msgCountBefore; i < currentChat.length; i++) {
+            const msg = currentChat[i];
+            simulCollectedMessages.push(JSON.parse(JSON.stringify(msg)));
+
+            if (msg.is_user) {
+                // 유저 메시지는 이미 위에 표시했으므로 스킵
+                continue;
+            }
+
+            const charMsgHtml = `
+                <div class="simul-message simul-message-char">
+                    <div class="simul-message-sender">💬 ${escapeHtml(msg.name || 'Character')}</div>
+                    <div class="simul-message-content">${formatSimulResponse(msg.mes || '')}</div>
+                </div>
+            `;
+            responseArea.append(charMsgHtml);
+        }
+
+        // 현재 채팅에서 시뮬 메시지 숨기기
+        const hideStart = msgCountBefore;
+        const hideEnd = currentChat.length - 1;
+        try {
+            await executeSlashCommands(`/hide ${hideStart}-${hideEnd}`);
+            await sleep(300);
+            const allHidden = currentChat.slice(hideStart, hideEnd + 1).every(m => m.is_hidden);
+            if (!allHidden) {
+                await executeSlashCommands(`/hide ${hideStart}-${hideEnd}`);
+            }
+        } catch (e) {
+            console.warn('[Broadcast] Simul hide error:', e);
+        }
+    } else {
+        responseArea.append(`
+            <div class="simul-message simul-message-char">
+                <div class="simul-message-sender">⚠️ 시스템</div>
+                <div class="simul-message-content">응답을 받지 못했습니다.</div>
+            </div>
+        `);
+    }
+
+    $('#simul-msg-count').text(`${simulCollectedMessages.length}건`);
+    responseArea.scrollTop(responseArea[0].scrollHeight);
+
+    $('#simul-send-btn').prop('disabled', false).text('전송');
+    $('#simul-message-input').prop('disabled', false).focus();
+}
+
+async function saveSimulMessages() {
+    if (simulCollectedMessages.length === 0) {
+        toastr.info('저장할 시뮬 메시지가 없습니다.');
+        return;
+    }
+
+    const ctx = getContext();
+
+    try {
+        toastr.info('시뮬 결과 저장 중...');
+
+        if (simulTargetIsNew) {
+            // 새 파일 생성 → 메시지 추가 → 원래 채팅으로 복귀
+            await executeSlashCommands('/newchat');
+            await sleep(2000);
+            await waitForChatLoad();
+
+            if (simulTargetNewName) {
+                try {
+                    await executeSlashCommands(`/renamechat ${simulTargetNewName}`);
+                    await sleep(500);
+                } catch (e) {
+                    console.warn('[Broadcast] Simul rename error:', e);
+                }
+            }
+
+            const newChat = ctx.chat;
+            for (const msg of simulCollectedMessages) {
+                newChat.push(msg);
+            }
+            await ctx.saveChat();
+            await sleep(500);
+
+            // 원래 채팅으로 복귀
+            await ctx.openCharacterChat(simulOriginalChatFileId);
+            await sleep(2000);
+            await waitForChatLoad();
+        } else {
+            // 기존 파일에 추가 → 원래 채팅으로 복귀
+            await ctx.openCharacterChat(simulTargetFileId);
+            await sleep(2000);
+            await waitForChatLoad();
+
+            const targetChat = ctx.chat;
+            for (const msg of simulCollectedMessages) {
+                targetChat.push(msg);
+            }
+            await ctx.saveChat();
+            await sleep(500);
+
+            // 원래 채팅으로 복귀
+            await ctx.openCharacterChat(simulOriginalChatFileId);
+            await sleep(2000);
+            await waitForChatLoad();
+        }
+
+        toastr.success(`${simulCollectedMessages.length}건의 시뮬 메시지가 저장되었습니다.`);
+    } catch (error) {
+        console.error('[Broadcast] Simul save error:', error);
+        toastr.error('시뮬 결과 저장 실패: ' + error.message);
+
+        try {
+            await ctx.openCharacterChat(simulOriginalChatFileId);
+        } catch (e) {
+            console.error('[Broadcast] Failed to return to original chat:', e);
+        }
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatSimulResponse(text) {
+    return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+function closeSimulPanel() {
+    isSimulating = false;
+    simulCollectedMessages = [];
+    simulTargetFileId = null;
+    simulTargetIsNew = false;
+    simulTargetNewName = '';
+    simulOriginalChatFileId = null;
+    const el = document.getElementById('simul-panel');
+    if (el) unpinFromViewport(el);
+    $('#simul-panel').remove();
+    toastr.info('시뮬레이션이 종료되었습니다.');
+}
+
+// ==================== 메뉴 버튼 ====================
+
 function addMenuButtons() {
     $('#broadcast_wand_container').remove();
     
@@ -1118,9 +1523,9 @@ function addMenuButtons() {
             </div>
         </div>
     `;
-    
+
     $('#extensionsMenu').prepend(buttonHtml);
-    
+
     $('#broadcast-btn').on('click', openChatSelector);
     $('#hide-btn').on('click', openHideModal);
     $('#backup-btn').on('click', openBackupModal);
