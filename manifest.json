@@ -6,6 +6,6 @@
     "js": "index.js",
     "css": "style.css",
     "author": "User",
-    "version": "3.6.0",
+    "version": "3.7.6",
     "description": "Broadcast messages, hide messages, and backup messages to other chat files"
 }
