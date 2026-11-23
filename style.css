@@ -1583,3 +1583,322 @@
     padding: 5px 13px 5px 5px;
     font-size: 10.5px;
 }
+
+.mes_button.bcx-mes-send {
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 0.2s;
+}
+
+.mes_button.bcx-mes-send:hover,
+.mes_button.bcx-mes-send:focus-visible {
+    opacity: 1;
+}
+
+.bcx-fold-h {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    text-align: left;
+}
+
+.bcx-fold-h b {
+    font-size: 13.5px;
+    white-space: nowrap;
+}
+
+.bcx-fold-t {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12.5px;
+    color: var(--bx-mute);
+}
+
+.bcx-chev {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--bx-mute);
+    transition: transform 0.15s;
+}
+
+.bcx-fold.open .bcx-chev {
+    transform: rotate(180deg);
+}
+
+.bcx-chg {
+    flex-shrink: 0;
+    font-size: 11.5px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    white-space: nowrap;
+    background: var(--bx-new-soft);
+    color: var(--bx-new);
+}
+
+.bcx-chg[hidden] {
+    display: none;
+}
+
+.bcx-peek {
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--bx-mute);
+    border: 1px solid var(--bx-line);
+    border-radius: 9px;
+    padding: 7px 10px;
+    cursor: pointer;
+}
+
+.bcx-peek-in {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+.bcx-fold.open .bcx-peek {
+    display: none;
+}
+
+.bcx-fold-b {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.bcx-fold-b[hidden] {
+    display: none;
+}
+
+.bcx-src {
+    font-size: 12.5px;
+    color: var(--bx-mute);
+    border: 1px solid var(--bx-line);
+    border-radius: 9px;
+    padding: 6px 10px;
+    overflow-wrap: anywhere;
+}
+
+.bcx-src b {
+    color: var(--bx-fg);
+}
+
+.bcx-tk {
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.92em;
+    padding: 0 4px;
+    border-radius: 4px;
+}
+
+.bcx-tk--u {
+    background: color-mix(in srgb, #4a9eff 26%, transparent);
+}
+
+.bcx-tk--c {
+    background: color-mix(in srgb, #e0559a 26%, transparent);
+}
+
+.bcx-rules {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.bcx-rules[hidden] {
+    display: none;
+}
+
+.bcx-rule {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bcx-rule .bcx-in {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+}
+
+.bcx-rule-arr {
+    color: var(--bx-mute);
+}
+
+.bcx-rule-tok,
+.bcx-via-sel {
+    margin: 0;
+    padding: 7px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--bx-line);
+    background: var(--bx-bg);
+    color: var(--bx-fg);
+    font: inherit;
+    font-size: 13px;
+}
+
+.bcx-rule-tok {
+    width: auto;
+    flex-shrink: 0;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+}
+
+.bcx-rule-rm {
+    flex-shrink: 0;
+    border: 0;
+    background: transparent;
+    color: var(--bx-mute) !important;
+    padding: 4px 6px;
+}
+
+.bcx-rules-f {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bcx-rules-f .bcx-chg {
+    margin-left: auto;
+}
+
+.bcx-rule-add {
+    border: 1px dashed var(--bx-line);
+    background: transparent;
+    padding: 5px 10px;
+    border-radius: 8px;
+    color: var(--bx-mute) !important;
+    font-size: 12.5px !important;
+}
+
+.bcx-hl {
+    position: relative;
+    border: 1px solid var(--bx-line);
+    border-radius: 10px;
+}
+
+.bcx-hl:focus-within {
+    border-color: var(--bx-acc);
+    box-shadow: 0 0 0 2px var(--bx-acc-soft);
+}
+
+.bcx-ov .bcx-hl-back,
+.bcx-ov textarea.bcx-hl-ta {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 9px 11px;
+    border: 1px solid transparent;
+    font: inherit;
+    font-size: 14px;
+    line-height: 1.55;
+    letter-spacing: normal;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: normal;
+    text-shadow: none;
+}
+
+.bcx-ov .bcx-hl-back {
+    position: absolute;
+    inset: 0;
+    color: transparent;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.bcx-ov .bcx-hl-back * {
+    text-shadow: none !important;
+}
+
+.bcx-hm {
+    color: transparent;
+    border-radius: 3px;
+}
+
+.bcx-hm--u {
+    background: color-mix(in srgb, #4a9eff 30%, transparent);
+}
+
+.bcx-hm--c {
+    background: color-mix(in srgb, #e0559a 30%, transparent);
+}
+
+.bcx-ov textarea.bcx-hl-ta {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 96px;
+    max-height: none;
+    background: transparent;
+    color: var(--bx-fg);
+    resize: none;
+    overflow: hidden;
+    outline: none;
+    box-shadow: none;
+}
+
+.bcx-srows {
+    max-height: min(340px, 42vh);
+}
+
+.bcx-srow {
+    border-radius: 10px;
+}
+
+.bcx-srow.on {
+    background: var(--bx-soft);
+    box-shadow: 0 0 0 1px var(--bx-line);
+}
+
+.bcx-via {
+    display: none;
+    flex-direction: column;
+    gap: 5px;
+    margin: 0 8px 8px 36px;
+}
+
+.bcx-srow.on .bcx-via {
+    display: flex;
+}
+
+.bcx-via-l {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+}
+
+.bcx-via-l span {
+    color: var(--bx-mute);
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.bcx-via-sel {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+}
+
+.bcx-flow {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--bx-mute);
+}
+
+.bcx-flow b {
+    color: var(--bx-fg);
+    font-weight: 600;
+}
+
+.bcx-f.is-idle {
+    opacity: 0.5;
+}

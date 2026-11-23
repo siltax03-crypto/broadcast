@@ -50,6 +50,15 @@ const defaultSettings = {
     moveName: '시뮬 {{date}}',
     moveOriginal: 'delete',
     moveUnhide: true,
+
+    showMsgIcon: true,
+    simReplace: true,
+    simChars: {},
+    simVia: {},
+    simDup: 'new',
+    simOriginal: 'keep',
+    simUnhide: true,
+    simBack: true,
 };
 
 let isProcessing = false;
@@ -215,6 +224,12 @@ function createSettingsUI() {
                             <span>백업 버튼 표시</span>
                         </label>
                     </div>
+                    <div class="bcx-settings-item">
+                        <label class="bcx-inline-label">
+                            <input type="checkbox" id="broadcast-show-msg-icon" ${extension_settings[extensionName].showMsgIcon !== false ? 'checked' : ''}>
+                            <span>메시지마다 📢 아이콘 표시</span>
+                        </label>
+                    </div>
                 </div>
             </div>
         </div>
@@ -238,6 +253,12 @@ function createSettingsUI() {
         extension_settings[extensionName].showBackupBtn = this.checked;
         saveSettingsDebounced();
         updateButtonVisibility();
+    });
+
+    $('#broadcast-show-msg-icon').on('change', function() {
+        extension_settings[extensionName].showMsgIcon = this.checked;
+        saveSettingsDebounced();
+        injectMsgIcons();
     });
 }
 
@@ -975,15 +996,21 @@ async function readChatFile(avatar, fileName) {
     return Array.isArray(data) ? data : [];
 }
 
-async function moveCollectedMessages(indices) {
+async function moveCollectedMessages(indices, o = {}) {
     const s = extension_settings[extensionName];
+    const opt = {
+        name: o.name !== undefined ? o.name : resolveMoveName(s.moveName),
+        mode: o.mode || s.moveMode,
+        original: o.original || s.moveOriginal,
+        unhide: o.unhide !== undefined ? o.unhide : s.moveUnhide,
+    };
     const ctx = getContext();
     const character = ctx.characters[ctx.characterId];
     if (!character) throw new Error('현재 캐릭터를 찾을 수 없어요');
 
     const avatar = character.avatar;
     const currentFileId = removeJsonlExtension(character.chat);
-    let fileName = resolveMoveName(s.moveName);
+    let fileName = String(opt.name || '').trim();
     if (!fileName) throw new Error('파일 이름이 비어 있어요');
     if (fileName === currentFileId) throw new Error(`지금 채팅과 같은 이름("${fileName}")이라 옮기지 않았어요`);
 
@@ -992,12 +1019,12 @@ async function moveCollectedMessages(indices) {
 
     const messages = sorted.map(i => {
         const copy = structuredClone(ctx.chat[i]);
-        if (s.moveUnhide) copy.is_system = false;
+        if (opt.unhide) copy.is_system = false;
         return copy;
     });
 
     let existing = await readChatFile(avatar, fileName);
-    if (s.moveMode === 'new' && existing.length > 0) {
+    if (opt.mode === 'new' && existing.length > 0) {
 
         const base = fileName;
         for (let n = 2; n < 100; n++) {
@@ -1021,7 +1048,7 @@ async function moveCollectedMessages(indices) {
 
     await postJson('/api/chats/save', { avatar_url: avatar, file_name: fileName, chat: chatData });
 
-    if (s.moveOriginal === 'delete') {
+    if (opt.original === 'delete') {
         const liveChat = getContext().chat;
         for (const index of [...sorted].sort((a, b) => b - a)) {
             if (index < liveChat.length) liveChat.splice(index, 1);
@@ -1833,6 +1860,709 @@ function closeSimulPanel() {
     toastr.info('시뮬레이션이 종료되었습니다.');
 }
 
+const simRoomCache = new Map();
+let msgIconTimer = null;
+let msgIconsReady = false;
+
+function simNameRe(name) {
+    const n = String(name || '').trim();
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return /^[\x20-\x7E]+$/.test(n)
+        ? new RegExp(`(?<![A-Za-z0-9_])${esc}(?![A-Za-z0-9_])`, 'g')
+        : new RegExp(esc, 'g');
+}
+
+function simSortedRules(rules) {
+    return rules
+        .filter(r => String(r.name || '').trim())
+        .slice()
+        .sort((a, b) => String(b.name).trim().length - String(a.name).trim().length);
+}
+
+function simApplyRules(text, rules) {
+    let out = String(text || '');
+    for (const r of simSortedRules(rules)) out = out.replace(simNameRe(r.name), r.tok);
+    return out;
+}
+
+function simRevertRules(text, rules) {
+    let out = String(text || '');
+    const seen = new Set();
+    for (const r of rules) {
+        const n = String(r.name || '').trim();
+        if (!n || seen.has(r.tok)) continue;
+        seen.add(r.tok);
+        out = out.split(r.tok).join(n);
+    }
+    return out;
+}
+
+function simMarkTokens(text, cls) {
+    return escapeAttr(text)
+        .replace(/\{\{user\}\}/g, `<span class="${cls} ${cls}--u">{{user}}</span>`)
+        .replace(/\{\{char\}\}/g, `<span class="${cls} ${cls}--c">{{char}}</span>`);
+}
+
+function simMMDD(ts) {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '';
+    return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function simHumanDate() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}@${p(d.getHours())}h${p(d.getMinutes())}m${p(d.getSeconds())}s`;
+}
+
+async function simLoadRooms(avatar) {
+    if (simRoomCache.has(avatar)) return simRoomCache.get(avatar);
+    let list = [];
+    try {
+        const data = await postJson('/api/characters/chats', { avatar_url: avatar });
+        const arr = Array.isArray(data) ? data : Object.values(data || {});
+        list = arr
+            .filter(f => f && typeof f === 'object' && f.file_name)
+            .map(f => {
+                const raw = f.last_mes;
+                const ts = typeof raw === 'number' ? raw : Date.parse(String(raw || ''));
+                return { name: removeJsonlExtension(String(f.file_name)), ts: Number.isFinite(ts) ? ts : 0 };
+            })
+            .sort((a, b) => b.ts - a.ts);
+    } catch (error) {
+        console.warn('[Broadcast] Room list failed', error);
+    }
+    simRoomCache.set(avatar, list);
+    return list;
+}
+
+function injectMsgIcons() {
+    if (extension_settings[extensionName].showMsgIcon === false) {
+        document.querySelectorAll('.bcx-mes-send').forEach(el => el.remove());
+        return;
+    }
+    document.querySelectorAll('#chat .mes').forEach((mesEl) => {
+        const row = mesEl.querySelector('.mes_buttons');
+        if (!row || row.querySelector('.bcx-mes-send')) return;
+        const btn = document.createElement('div');
+        btn.className = 'mes_button bcx-mes-send fa-solid fa-bullhorn interactable';
+        btn.title = '이 글을 다른 캐릭터에게 보내기';
+        btn.tabIndex = 0;
+        const anchor = row.querySelector('.gr-btn') || row.querySelector('.extraMesButtonsHint');
+        if (anchor && anchor.parentElement === row) row.insertBefore(btn, anchor);
+        else row.prepend(btn);
+    });
+}
+
+function scheduleMsgIcons() {
+    clearTimeout(msgIconTimer);
+    msgIconTimer = setTimeout(injectMsgIcons, 80);
+}
+
+function setupMsgIcons() {
+    if (msgIconsReady) return;
+    msgIconsReady = true;
+
+    const names = ['CHAT_CHANGED', 'MESSAGE_RECEIVED', 'MESSAGE_SENT', 'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED',
+        'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MORE_MESSAGES_LOADED'];
+    for (const n of names) {
+        if (event_types?.[n]) eventSource.on(event_types[n], scheduleMsgIcons);
+    }
+
+    const chatEl = document.getElementById('chat');
+    if (chatEl && typeof MutationObserver === 'function') {
+        new MutationObserver(scheduleMsgIcons).observe(chatEl, { childList: true });
+    }
+
+    $(document).on('click', '.bcx-mes-send', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = Number($(this).closest('.mes').attr('mesid'));
+        openSimSend(id);
+    });
+    $(document).on('keydown', '.bcx-mes-send', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            $(this).trigger('click');
+        }
+    });
+
+    injectMsgIcons();
+}
+
+async function openSimSend(mesId) {
+    if (isProcessing) {
+        toastr.warning('이미 보내는 중이에요.');
+        return;
+    }
+    const ctx = getContext();
+    const msg = Number.isInteger(mesId) ? ctx.chat?.[mesId] : null;
+    if (!msg) {
+        toastr.error('메시지를 찾을 수 없어요.');
+        return;
+    }
+
+    const s = extension_settings[extensionName];
+    const srcChar = ctx.groupId ? null : ctx.characters?.[ctx.characterId];
+    const source = {
+        isGroup: !!ctx.groupId,
+        avatar: String(srcChar?.avatar || ''),
+        charName: ctx.groupId ? (msg.is_user ? '' : String(msg.name || '')) : String(srcChar?.name || ctx.name2 || ''),
+        file: removeJsonlExtension(String(ctx.getCurrentChatId?.() || srcChar?.chat || '')),
+        mesId,
+    };
+
+    const original = String(msg.mes || '');
+    const persona = String(ctx.name1 || '').trim();
+    const rules = [];
+    if (persona) rules.push({ name: persona, tok: '{{user}}' });
+    if (source.charName.trim() && source.charName.trim() !== persona) rules.push({ name: source.charName.trim(), tok: '{{char}}' });
+
+    const st = {
+        rep: s.simReplace !== false,
+        rules,
+        applied: null,
+        text: original,
+        edited: false,
+        open: false,
+        arrive: source.file,
+    };
+    if (st.rep) {
+        st.text = simApplyRules(original, st.rules);
+        st.applied = st.rules.map(r => ({ ...r }));
+    }
+
+    simRoomCache.clear();
+    const chars = (await getChatList())
+        .filter(c => !c.isGroup && c.avatar && c.avatar !== source.avatar)
+        .map(c => {
+            const ch = ctx.characters.find(x => x.avatar === c.avatar);
+            return {
+                name: c.name,
+                avatar: c.avatar,
+                on: !!s.simChars?.[c.avatar],
+                via: String(s.simVia?.[c.avatar] || ''),
+                rooms: null,
+                lastChat: removeJsonlExtension(String(ch?.chat || '')),
+            };
+        });
+    if (!chars.length) {
+        toastr.info('보낼 캐릭터가 없어요.');
+        return;
+    }
+
+    const rowHtml = (c, i) => `
+        <div class="bcx-srow ${c.on ? 'on' : ''}" data-i="${i}" data-name="${escapeAttr(c.name.toLowerCase())}">
+            <label class="bcx-crow">
+                <input type="checkbox" class="bcx-sim-chk" data-i="${i}" ${c.on ? 'checked' : ''}>
+                <img class="bcx-av" loading="lazy" src="/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}" alt="">
+                <span class="bcx-cname">${escapeAttr(c.name)}</span>
+            </label>
+            <div class="bcx-via">
+                <div class="bcx-via-l"><span>거칠 방</span>
+                    <select class="bcx-via-sel" data-i="${i}">
+                        <option value="">안 거침 → 같은 이름 방에서 바로</option>
+                        ${c.via ? `<option value="${escapeAttr(c.via)}" selected>💬 ${escapeAttr(c.via)}</option>` : ''}
+                    </select></div>
+                <div class="bcx-flow" data-i="${i}"></div>
+            </div>
+        </div>`;
+
+    const backRow = source.isGroup || !source.avatar
+        ? ''
+        : `<div class="bcx-opt"><span>다 끝나면 「${escapeAttr(source.file)}」로 돌아오기</span>${sw(s.simBack, 'id="bcx-sim-back"')}</div>`;
+
+    const body = `
+        <section class="bcx-card bcx-fold" id="bcx-sim-text">
+            <button type="button" class="bcx-fold-h" data-bcx-fold>
+                <b>보낼 글</b><span class="bcx-cnt">#${mesId}</span>
+                <span class="bcx-fold-t" id="bcx-sim-title"></span>
+                <span class="bcx-chg" id="bcx-sim-chg2"></span>
+                <i class="fa-solid fa-chevron-down bcx-chev"></i>
+            </button>
+            <div class="bcx-peek" id="bcx-sim-peek" data-bcx-fold></div>
+            <div class="bcx-fold-b" id="bcx-sim-body" hidden>
+                <div class="bcx-src">📍 <b>${escapeAttr(source.charName || '그룹')}</b> · 「${escapeAttr(source.file)}」 · <b>#${mesId}</b></div>
+                <div class="bcx-opt"><span>이름 → <span class="bcx-tk bcx-tk--u">{{user}}</span> <span class="bcx-tk bcx-tk--c">{{char}}</span> 바꾸기</span>${sw(st.rep, 'id="bcx-sim-rep"')}</div>
+                <div class="bcx-rules" id="bcx-sim-rules" ${st.rep ? '' : 'hidden'}></div>
+                <div class="bcx-hl">
+                    <div class="bcx-hl-back" id="bcx-sim-hlb" aria-hidden="true"></div>
+                    <textarea class="bcx-hl-ta" id="bcx-sim-ta" spellcheck="false"></textarea>
+                </div>
+                <small class="bcx-hint">여기서 고친 글이 그대로 나가요. {{user}}·{{char}}는 받는 방에서 그 방 이름으로 바뀌어요.</small>
+            </div>
+        </section>
+
+        <section class="bcx-card" id="bcx-sim-char">
+            <div class="bcx-ch"><b>보낼 캐릭터</b><span class="bcx-cnt" id="bcx-sim-cnt"></span>
+                <button type="button" class="bcx-link" id="bcx-sim-all">전체 선택</button></div>
+            <input type="search" class="bcx-search" id="bcx-sim-search" placeholder="🔍 이름 검색">
+            <div class="bcx-crows bcx-srows">${chars.map(rowHtml).join('')}</div>
+        </section>
+
+        <section class="bcx-card" id="bcx-sim-arr">
+            <div class="bcx-ch"><b>📦 도착 방</b></div>
+            <div class="bcx-f"><span class="bcx-l">방 이름 (캐릭터마다 이 이름으로)</span>
+                <input type="text" class="bcx-in" id="bcx-sim-arrive" value="${escapeAttr(st.arrive)}">
+                <small class="bcx-hint">원본 방 제목 그대로 들어가 있어요. 고쳐도 돼요.</small></div>
+            <div class="bcx-f"><span class="bcx-l">같은 이름 방이 이미 있으면</span>
+                ${seg('bcx-sim-dup', [['new', '새로 만들기 (2)'], ['append', '거기 이어서']], s.simDup)}</div>
+            <div class="bcx-f" id="bcx-sim-origf"><span class="bcx-l">거친 방에선 (거칠 방 고른 캐릭터만)</span>
+                ${seg('bcx-sim-orig', [['keep', '숨긴 채 두기 (복사)'], ['delete', '지우기 (이동)']], s.simOriginal)}</div>
+            <div class="bcx-opt"><span>도착 방에선 숨김 풀기</span>${sw(s.simUnhide, 'id="bcx-sim-unhide"')}</div>
+            ${backRow}
+        </section>
+    `;
+
+    const steps = `
+        <div class="bcx-steps">
+            <button type="button" data-jump="bcx-sim-text">글</button>
+            <button type="button" data-jump="bcx-sim-char">캐릭터</button>
+            <button type="button" data-jump="bcx-sim-arr">도착 방</button>
+        </div>`;
+
+    let job = null;
+
+    const ok = await bcxModal({
+        title: '📢 시뮬 보내기',
+        steps,
+        body,
+        okText: '보내기',
+        size: 'lg',
+        onMount(root) {
+            const $r = $(root);
+            const ta = root.querySelector('#bcx-sim-ta');
+            const hlb = root.querySelector('#bcx-sim-hlb');
+
+            const paint = () => {
+                if (ta.value !== st.text) ta.value = st.text;
+                hlb.innerHTML = `${simMarkTokens(st.text, 'bcx-hm')}\n `;
+                if (st.open) {
+                    ta.style.height = 'auto';
+                    ta.style.height = `${ta.scrollHeight}px`;
+                }
+                const n = (st.text.match(/\{\{(user|char)\}\}/g) || []).length;
+                const label = n ? `${n}군데 바뀜` : '바뀐 곳 없음';
+                $r.find('#bcx-sim-chg').text(label);
+                $r.find('#bcx-sim-chg2').text(label).prop('hidden', !st.rep);
+                const lines = st.text.split('\n');
+                $r.find('#bcx-sim-title').text(lines[0] || '');
+                const rest = lines.slice(1).join('\n').trim();
+                $r.find('#bcx-sim-peek').html(`<div class="bcx-peek-in">${simMarkTokens(rest || st.text, 'bcx-tk')}</div>`);
+            };
+
+            const derive = (mutate) => {
+                if (st.edited) {
+                    if (st.rep) st.text = simRevertRules(st.text, st.applied || st.rules);
+                    mutate();
+                    if (st.rep) st.text = simApplyRules(st.text, st.rules);
+                } else {
+                    mutate();
+                    st.text = st.rep ? simApplyRules(original, st.rules) : original;
+                }
+                st.applied = st.rep ? st.rules.map(r => ({ ...r })) : null;
+                paint();
+            };
+
+            const drawRules = () => {
+                $r.find('#bcx-sim-rules').html(`${st.rules.map((r, i) => `
+                    <div class="bcx-rule">
+                        <input type="text" class="bcx-in" data-rname="${i}" value="${escapeAttr(r.name)}" placeholder="원본에 적힌 이름">
+                        <span class="bcx-rule-arr">→</span>
+                        <select class="bcx-rule-tok" data-rtok="${i}">
+                            <option value="{{user}}" ${r.tok === '{{user}}' ? 'selected' : ''}>{{user}}</option>
+                            <option value="{{char}}" ${r.tok === '{{char}}' ? 'selected' : ''}>{{char}}</option>
+                        </select>
+                        <button type="button" class="bcx-rule-rm" data-rrm="${i}" title="빼기">✕</button>
+                    </div>`).join('')}
+                    <div class="bcx-rules-f"><button type="button" class="bcx-rule-add" data-radd>＋ 이름 더</button><span class="bcx-chg" id="bcx-sim-chg"></span></div>`);
+            };
+
+            const activeVia = (c) => (c.via && c.via !== st.arrive.trim() ? c.via : '');
+
+            const flowHtml = (c) => {
+                const a = escapeAttr(st.arrive.trim() || '(방 이름 없음)');
+                const via = activeVia(c);
+                if (via) {
+                    const how = segValue(root, 'bcx-sim-orig') === 'delete' ? '이동' : '복사';
+                    return `<b>${escapeAttr(via)}</b>에서 돌림 → 거기선 숨김 → <b>「${a}」</b>로 ${how}`;
+                }
+                const dup = segValue(root, 'bcx-sim-dup') === 'append' ? '이미 있으면 거기 이어서' : `이미 있으면 「${a} (2)」`;
+                return `<b>「${a}」</b> 방에서 바로 돌림 · 없으면 새로 만듦 · ${dup}`;
+            };
+
+            const refresh = () => {
+                const on = chars.filter(c => c.on);
+                const viaN = on.filter(c => activeVia(c)).length;
+                $r.find('#bcx-sim-cnt').text(`${on.length} / ${chars.length}`);
+                $r.find('#bcx-sim-all').text(on.length === chars.length ? '전체 해제' : '전체 선택');
+                $r.find('#bcx-sim-origf').toggleClass('is-idle', viaN === 0);
+                chars.forEach((c, i) => {
+                    const el = root.querySelector(`.bcx-flow[data-i="${i}"]`);
+                    if (el && c.on) el.innerHTML = flowHtml(c);
+                });
+                $r.find('.bcx-sum').html(on.length
+                    ? `<b>${on.length}명</b> = ${on.length}번 생성${viaN ? ` · 거쳐 가는 방 ${viaN}곳` : ''}`
+                    : '캐릭터를 골라 주세요');
+            };
+
+            const fillRooms = async (i) => {
+                const c = chars[i];
+                if (c.rooms) return;
+                c.rooms = await simLoadRooms(c.avatar);
+                const sel = root.querySelector(`.bcx-via-sel[data-i="${i}"]`);
+                if (!sel) return;
+                const ordered = [...c.rooms].sort((x, y) => (y.name === c.lastChat) - (x.name === c.lastChat));
+                sel.innerHTML = ['<option value="">안 거침 → 같은 이름 방에서 바로</option>']
+                    .concat(ordered.map(r => {
+                        const tags = [r.name === c.lastChat ? '최근 연 방' : '', r.ts ? simMMDD(r.ts) : ''].filter(Boolean).join(' · ');
+                        return `<option value="${escapeAttr(r.name)}">💬 ${escapeAttr(r.name)}${tags ? ` (${escapeAttr(tags)})` : ''}</option>`;
+                    }))
+                    .join('');
+                sel.value = ordered.some(r => r.name === c.via) ? c.via : '';
+                c.via = sel.value;
+                refresh();
+            };
+
+            $r.on('input', '#bcx-sim-ta', function () {
+                st.text = this.value;
+                st.edited = true;
+                paint();
+            });
+            $r.on('click', '[data-bcx-fold]', () => {
+                st.open = !st.open;
+                $r.find('#bcx-sim-text').toggleClass('open', st.open);
+                $r.find('#bcx-sim-body').prop('hidden', !st.open);
+                paint();
+            });
+            $r.on('bcx-change', '#bcx-sim-rep', function () {
+                const on = $(this).hasClass('on');
+                derive(() => { st.rep = on; });
+                $r.find('#bcx-sim-rules').prop('hidden', !on);
+            });
+            $r.on('input', '[data-rname]', function () {
+                const i = Number($(this).data('rname'));
+                const v = this.value;
+                derive(() => { st.rules[i].name = v; });
+            });
+            $r.on('change', '[data-rtok]', function () {
+                const i = Number($(this).data('rtok'));
+                const v = this.value;
+                derive(() => { st.rules[i].tok = v; });
+            });
+            $r.on('click', '[data-radd]', () => {
+                derive(() => { st.rules.push({ name: '', tok: '{{char}}' }); });
+                drawRules();
+                paint();
+                $r.find(`[data-rname="${st.rules.length - 1}"]`).trigger('focus');
+            });
+            $r.on('click', '[data-rrm]', function () {
+                const i = Number($(this).data('rrm'));
+                derive(() => { st.rules.splice(i, 1); });
+                drawRules();
+                paint();
+            });
+
+            $r.on('change', '.bcx-sim-chk', function () {
+                const i = Number($(this).data('i'));
+                chars[i].on = this.checked;
+                $(this).closest('.bcx-srow').toggleClass('on', this.checked);
+                if (this.checked) fillRooms(i);
+                refresh();
+            });
+            $r.on('focus pointerdown', '.bcx-via-sel', function () {
+                fillRooms(Number($(this).data('i')));
+            });
+            $r.on('change', '.bcx-via-sel', function () {
+                chars[Number($(this).data('i'))].via = this.value;
+                refresh();
+            });
+            $r.on('click', '#bcx-sim-all', () => {
+                const all = chars.every(c => c.on);
+                chars.forEach((c, i) => {
+                    c.on = !all;
+                    const row = root.querySelector(`.bcx-srow[data-i="${i}"]`);
+                    row?.classList.toggle('on', c.on);
+                    const box = row?.querySelector('.bcx-sim-chk');
+                    if (box) box.checked = c.on;
+                });
+                refresh();
+            });
+            $r.on('input', '#bcx-sim-search', function () {
+                const q = this.value.trim().toLowerCase();
+                $r.find('.bcx-srow').each(function () {
+                    $(this).toggle(!q || String($(this).data('name')).includes(q));
+                });
+            });
+            $r.on('input', '#bcx-sim-arrive', function () {
+                st.arrive = this.value;
+                refresh();
+            });
+            $r.on('bcx-change', '#bcx-sim-dup, #bcx-sim-orig', refresh);
+            $r.on('click', '[data-jump]', function () {
+                root.querySelector(`#${$(this).data('jump')}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+
+            drawRules();
+            paint();
+            chars.forEach((c, i) => { if (c.on) fillRooms(i); });
+            refresh();
+        },
+        onOk(root) {
+            const $r = $(root);
+            const text = st.text.trim();
+            if (!text) {
+                toastr.warning('보낼 글이 비어 있어요.');
+                return false;
+            }
+            const picked = chars.filter(c => c.on);
+            if (!picked.length) {
+                toastr.warning('캐릭터를 하나 이상 골라 주세요.');
+                return false;
+            }
+            const arrive = st.arrive.trim();
+            if (!arrive) {
+                toastr.warning('도착 방 이름을 적어 주세요.');
+                return false;
+            }
+            if (/[\\/:*?"<>|]/.test(arrive)) {
+                toastr.warning('방 이름에 \\ / : * ? " < > | 는 못 써요.');
+                return false;
+            }
+
+            const simChars = {};
+            const simVia = { ...(s.simVia || {}) };
+            for (const c of chars) {
+                if (!c.on) continue;
+                simChars[c.avatar] = true;
+                if (c.via) simVia[c.avatar] = c.via;
+                else delete simVia[c.avatar];
+            }
+            const $back = $r.find('#bcx-sim-back');
+            s.simChars = simChars;
+            s.simVia = simVia;
+            s.simReplace = st.rep;
+            s.simDup = segValue(root, 'bcx-sim-dup') || 'new';
+            s.simOriginal = segValue(root, 'bcx-sim-orig') || 'keep';
+            s.simUnhide = $r.find('#bcx-sim-unhide').hasClass('on');
+            if ($back.length) s.simBack = $back.hasClass('on');
+            saveSettingsDebounced();
+
+            job = {
+                text,
+                mesId,
+                arrive,
+                dup: s.simDup,
+                original: s.simOriginal,
+                unhide: s.simUnhide,
+                back: $back.length ? $back.hasClass('on') : false,
+                source,
+                chars: picked.map(c => ({ name: c.name, avatar: c.avatar, via: c.via && c.via !== arrive ? c.via : '' })),
+            };
+            return true;
+        },
+    });
+
+    if (!ok || !job) return;
+    await runSimSend(job);
+}
+
+function simCurrentFile() {
+    const ctx = getContext();
+    return removeJsonlExtension(String(ctx.characters?.[ctx.characterId]?.chat || ''));
+}
+
+async function simOpenRoom(name) {
+    if (simCurrentFile() !== name) {
+        await getContext().openCharacterChat(name);
+        await sleep(800);
+        await waitForChatLoad();
+    }
+    if (simCurrentFile() !== name) throw new Error(`「${name}」 방을 못 열었어요`);
+}
+
+async function simPrepareArrive(avatar, base, dup) {
+    const existing = await readChatFile(avatar, base);
+    if (existing.length > 0 && dup === 'append') return base;
+    let name = base;
+    if (existing.length > 0) {
+        name = '';
+        for (let n = 2; n < 100; n++) {
+            const candidate = `${base} (${n})`;
+            if ((await readChatFile(avatar, candidate)).length === 0) {
+                name = candidate;
+                break;
+            }
+        }
+        if (!name) throw new Error(`"${base}" 이름이 너무 많이 쓰였어요`);
+    }
+    await postJson('/api/chats/save', {
+        avatar_url: avatar,
+        file_name: name,
+        chat: [{ user_name: 'unused', character_name: 'unused', create_date: simHumanDate(), chat_metadata: {} }],
+    });
+    return name;
+}
+
+async function simReturnToSource(src) {
+    if (src.isGroup || !src.avatar) return;
+    const ctx = getContext();
+    const idx = ctx.characters.findIndex(c => c.avatar === src.avatar);
+    if (idx < 0) return;
+    if (String(ctx.characterId) !== String(idx)) {
+        await switchToChat({ name: src.charName, avatar: src.avatar, isGroup: false });
+    }
+    await simOpenRoom(src.file);
+    await sleep(300);
+    document.querySelector(`#chat .mes[mesid="${src.mesId}"]`)?.scrollIntoView({ block: 'center' });
+}
+
+async function runSimSend(job) {
+    if (isProcessing) {
+        toastr.warning('이미 진행 중입니다.');
+        return;
+    }
+
+    isProcessing = true;
+    isPaused = false;
+    shouldStop = false;
+    currentBroadcastMessages = [job.text];
+    currentCharIndex = 0;
+    currentMessageIndex = 0;
+    const expectedPersona = extension_settings[extensionName].expectedPersona;
+
+    progress = {
+        totalMsgs: 1,
+        collapsed: false,
+        chars: job.chars.map(c => ({ name: c.name, avatar: c.avatar, isGroup: false, move: !!c.via, status: 'wait', sent: 0, moveName: job.arrive })),
+    };
+
+    showBroadcastControlPanel();
+    renderProgress();
+    toastr.info(`${job.chars.length}명에게 #${job.mesId} 보내기를 시작해요.`);
+
+    let okCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < job.chars.length; i++) {
+        if (shouldStop) break;
+
+        currentCharIndex = i;
+        const c = job.chars[i];
+        const state = progress.chars[i];
+        state.status = 'cur';
+
+        try {
+            renderProgress('채팅으로 이동 중…');
+            await switchToChat({ name: c.name, avatar: c.avatar, isGroup: false });
+            if (!(await verifyCurrentChat(c.name, expectedPersona))) throw new Error('채팅 전환 실패');
+
+            let room = c.via;
+            if (!room) {
+                renderProgress('도착 방 준비 중…');
+                room = await simPrepareArrive(c.avatar, job.arrive, job.dup);
+                state.moveName = room;
+            }
+            renderProgress(`「${room}」 여는 중…`);
+            await simOpenRoom(room);
+
+            while (isPaused && !shouldStop) await sleep(500);
+            if (shouldStop) break;
+
+            const message = String(currentBroadcastMessages[0] || '').trim();
+            if (!message) throw new Error('보낼 글이 비어 있어요');
+
+            renderProgress('보내는 중…');
+            const before = getContext().chat.length;
+            $('#send_textarea').val(message);
+            $('#send_but').trigger('click');
+
+            renderProgress('답 기다리는 중…');
+            await waitForResponseComplete(600000, (phase) => {
+                if (phase === 'image') renderProgress('이미지 기다리는 중…');
+            });
+            await sleep(1000);
+
+            if (getContext().chat.length <= before) throw new Error('메시지가 안 나갔어요');
+            state.sent = 1;
+            renderProgress();
+
+            if (c.via) {
+                const waitStart = Date.now();
+                while (isTextGenerating() && Date.now() - waitStart < 120000) await sleep(300);
+                const after = getContext().chat.length;
+
+                renderProgress('거친 방에선 숨기는 중…');
+                await executeSlashCommands(`/hide ${before}-${after - 1}`);
+                await sleep(500);
+                if (!getContext().chat.slice(before, after).every(m => m.is_system)) {
+                    await executeSlashCommands(`/hide ${before}-${after - 1}`);
+                    await sleep(500);
+                }
+
+                state.moving = true;
+                renderProgress(`「${job.arrive}」로 옮기는 중…`);
+                const indices = [];
+                for (let k = before; k < after; k++) indices.push(k);
+                try {
+                    const moved = await moveCollectedMessages(indices, {
+                        name: job.arrive,
+                        mode: job.dup,
+                        original: job.original,
+                        unhide: job.unhide,
+                    });
+                    state.movedTo = moved.fileName;
+                    state.moveName = moved.fileName;
+                } catch (moveError) {
+                    console.error(`[Broadcast] Sim move failed: ${c.name}`, moveError);
+                    toastr.error(`📦 옮기기 실패: ${c.name} - ${moveError.message}`);
+                    state.movedTo = '실패(거친 방에 남음)';
+                }
+                state.moving = false;
+                state.moved = true;
+            } else {
+                state.movedTo = room;
+            }
+
+            okCount++;
+            state.status = 'done';
+            state.note = '';
+            renderProgress();
+
+            if (i < job.chars.length - 1 && !shouldStop) await sleep(1500);
+        } catch (error) {
+            console.error(`[Broadcast] Sim send failed: ${c.name}`, error);
+            failCount++;
+            state.status = 'fail';
+            state.note = error.message;
+            renderProgress();
+            toastr.error(`실패: ${c.name} - ${error.message}`);
+        }
+    }
+
+    if (job.back) {
+        renderProgress('원래 방으로 돌아가는 중…');
+        try {
+            await simReturnToSource(job.source);
+        } catch (error) {
+            console.warn('[Broadcast] Return failed', error);
+            toastr.warning(`원래 방으로 못 돌아왔어요: ${error.message}`);
+        }
+    }
+
+    isProcessing = false;
+    hideControlPanel();
+    progress = null;
+
+    if (shouldStop) {
+        toastr.warning(`중지했어요. 성공: ${okCount}, 실패: ${failCount}`);
+    } else if (failCount > 0) {
+        toastr.warning(`끝났어요. 성공: ${okCount}, 실패: ${failCount}`);
+    } else {
+        toastr.success(`🎉 ${okCount}명 모두 보냈어요!`);
+    }
+}
+
 function addMenuButtons() {
     $('#broadcast_wand_container').remove();
 
@@ -1866,5 +2596,6 @@ jQuery(async () => {
 
     setTimeout(() => {
         addMenuButtons();
+        setupMsgIcons();
     }, 1000);
 });
